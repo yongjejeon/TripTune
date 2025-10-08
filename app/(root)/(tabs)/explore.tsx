@@ -150,6 +150,8 @@ export default function Explore() {
   const [scheduleAdjustments, setScheduleAdjustments] = useState<any[]>([]);
   const [lastWeatherCheck, setLastWeatherCheck] = useState<number>(0);
   const [lastScheduleCheck, setLastScheduleCheck] = useState<number>(0);
+  const [currentTripDayIndex, setCurrentTripDayIndex] = useState<number | null>(null);
+  const [lastDateNotice, setLastDateNotice] = useState<number>(0);
 
   // tracking state
   const [isTracking, setIsTracking] = useState(false);
@@ -193,30 +195,140 @@ export default function Explore() {
 
   // ---------------- Automatic schedule monitoring with location tracking ----------------
   useEffect(() => {
-    if (!optimizedResult?.itinerary || !userLocation) return;
-    
-    const idx = optimizedResult.itinerary.findIndex((item: any) => {
-      if (!item.lat || !item.lng) return false;
-      const d = haversineMeters(userLocation, { lat: item.lat, lng: item.lng });
+    if (!isTracking) return;
+    if (!userLocation) return;
+
+    // Helper to format local date as YYYY-MM-DD
+    const localDateString = () => {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const da = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${da}`;
+    };
+
+    // Prefer multi-day plan for tracking
+    if (tripPlan?.days?.length) {
+      const today = localDateString();
+      const dayIdx = tripPlan.days.findIndex((d: any) => d.date === today);
+      if (dayIdx === -1) {
+        setCurrentTripDayIndex(null);
+        setCurrentActivityIdx(null);
+        setScheduleStatus(null);
+        const now = Date.now();
+        if (now - lastDateNotice > 60_000) {
+          Alert.alert(
+            "Outside Trip Dates",
+            `Today (${today}) is outside your planned trip (${tripPlan.startDate} to ${tripPlan.endDate}). Tracking highlights are disabled.`
+          );
+          setLastDateNotice(now);
+        }
+        return;
+      }
+      setCurrentTripDayIndex(dayIdx);
+      const todaysItinerary = tripPlan.days[dayIdx]?.itinerary || [];
+      if (!todaysItinerary.length) {
+        setCurrentActivityIdx(null);
+        setScheduleStatus(null);
+        return;
+      }
+
+      const idx = todaysItinerary.findIndex((item: any) => {
+        const lat = item.lat ?? item.coordinates?.lat;
+        const lng = item.lng ?? item.coordinates?.lng;
+        if (lat == null || lng == null) return false;
+        const d = haversineMeters(userLocation, { lat, lng });
+        return d <= 120;
+      });
+
+      let newCurrentIdx: number | null = idx !== -1 ? idx : null;
+      if (newCurrentIdx === null) {
+        const now = new Date();
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+        const withinNowIdx = todaysItinerary.findIndex((item: any) => {
+          if (!item.start_time || !item.end_time) return false;
+          const s = timeToMinutes(item.start_time);
+          const e = timeToMinutes(item.end_time);
+          return s <= nowMins && nowMins <= e;
+        });
+        if (withinNowIdx !== -1) newCurrentIdx = withinNowIdx;
+        else {
+          const upcomingIdx = todaysItinerary.findIndex((item: any) => {
+            if (!item.start_time) return false;
+            const s = timeToMinutes(item.start_time);
+            return s > nowMins;
+          });
+          if (upcomingIdx !== -1) newCurrentIdx = upcomingIdx;
+          else if (todaysItinerary.length > 0) newCurrentIdx = todaysItinerary.length - 1;
+        }
+      }
+
+      setCurrentActivityIdx(newCurrentIdx);
+      if (newCurrentIdx !== null) {
+        const status = calculateScheduleStatus(todaysItinerary, newCurrentIdx);
+        setScheduleStatus(status);
+
+        const nowTs = Date.now();
+        const timeSinceLastCheck = nowTs - lastScheduleCheck;
+        if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
+          setLastScheduleCheck(nowTs);
+          generateScheduleAdjustments(todaysItinerary, status, userLocation)
+            .then(adjustments => {
+              if (adjustments.length > 0) {
+                setScheduleAdjustments(adjustments);
+                showScheduleAdjustmentPrompt(adjustments);
+              }
+            })
+            .catch(error => {
+              console.error('❌ Failed to generate schedule adjustments:', error);
+            });
+        }
+      }
+      return;
+    }
+
+    // Fallback: single-day itineraries
+    const itinerary = (weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || rawResult?.itinerary);
+    if (!itinerary) return;
+
+    const idx = itinerary.findIndex((item: any) => {
+      const lat = item.lat ?? item.coordinates?.lat;
+      const lng = item.lng ?? item.coordinates?.lng;
+      if (lat == null || lng == null) return false;
+      const d = haversineMeters(userLocation, { lat, lng });
       return d <= 120; // within 120m
     });
-    
-    const newCurrentIdx = idx !== -1 ? idx : null;
+
+    let newCurrentIdx: number | null = idx !== -1 ? idx : null;
+    if (newCurrentIdx === null) {
+      const now = new Date();
+      const nowMins = now.getHours() * 60 + now.getMinutes();
+      const withinNowIdx = itinerary.findIndex((item: any) => {
+        if (!item.start_time || !item.end_time) return false;
+        const s = timeToMinutes(item.start_time);
+        const e = timeToMinutes(item.end_time);
+        return s <= nowMins && nowMins <= e;
+      });
+      if (withinNowIdx !== -1) newCurrentIdx = withinNowIdx;
+      else {
+        const upcomingIdx = itinerary.findIndex((item: any) => {
+          if (!item.start_time) return false;
+          const s = timeToMinutes(item.start_time);
+          return s > nowMins;
+        });
+        if (upcomingIdx !== -1) newCurrentIdx = upcomingIdx;
+        else if (itinerary.length > 0) newCurrentIdx = itinerary.length - 1;
+      }
+    }
     setCurrentActivityIdx(newCurrentIdx);
-    
-    // Always check schedule status when location updates (if we have an itinerary)
     if (newCurrentIdx !== null) {
-      const status = calculateScheduleStatus(optimizedResult.itinerary, newCurrentIdx);
+      const status = calculateScheduleStatus(itinerary, newCurrentIdx);
       setScheduleStatus(status);
-      
-      // Check if user is behind schedule and we haven't checked recently (avoid spam)
-      const now = Date.now();
-      const timeSinceLastCheck = now - lastScheduleCheck;
-      
-      if (status.isBehindSchedule && timeSinceLastCheck > 30000) { // 30 seconds between checks
-        setLastScheduleCheck(now);
-        
-        generateScheduleAdjustments(optimizedResult.itinerary, status, userLocation)
+      const nowTs = Date.now();
+      const timeSinceLastCheck = nowTs - lastScheduleCheck;
+      if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
+        setLastScheduleCheck(nowTs);
+        generateScheduleAdjustments(itinerary, status, userLocation)
           .then(adjustments => {
             if (adjustments.length > 0) {
               setScheduleAdjustments(adjustments);
@@ -228,7 +340,7 @@ export default function Explore() {
           });
       }
     }
-  }, [userLocation, optimizedResult, lastScheduleCheck]);
+  }, [isTracking, userLocation, rawResult, optimizedResult, weatherAdaptedResult, tripPlan, lastScheduleCheck, lastDateNotice]);
 
   // ---------------- Generate / View / Optimize ----------------
   const handleGenerate = async () => {
@@ -680,11 +792,9 @@ export default function Explore() {
         <Text className="text-xl font-rubik-bold mb-4">{title}</Text>
         
         {/* Location Status */}
-        {currentActivityIdx === null && optimizedResult?.itinerary && (
+        {isTracking && currentActivityIdx === null && (weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || rawResult?.itinerary) && (
           <View className="mb-4 p-3 bg-yellow-50 rounded-lg border border-yellow-200">
-            <Text className="text-sm font-rubik-semibold text-yellow-800">
-              🚶 Not at any scheduled location
-            </Text>
+            <Text className="text-sm font-rubik-semibold text-yellow-800">Not at any scheduled location</Text>
             <Text className="text-xs text-yellow-600 mt-1">
               Move closer to a scheduled activity to track your progress
             </Text>
@@ -692,12 +802,10 @@ export default function Explore() {
         )}
 
         {/* Progress Bar */}
-        {currentActivityIdx !== null && (
+        {isTracking && currentActivityIdx !== null && (
           <View className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
             <View className="flex-row justify-between items-center mb-2">
-              <Text className="text-sm font-rubik-semibold text-gray-700">
-                Schedule Progress
-              </Text>
+              <Text className="text-sm font-rubik-semibold text-gray-700">Schedule Progress</Text>
               <Text className="text-sm text-gray-600">
                 {completedActivities}/{totalActivities} activities
               </Text>
@@ -714,10 +822,10 @@ export default function Explore() {
           </View>
         )}
         {itinerary.map((item: any, idx: number) => {
-          const isCurrent = currentActivityIdx === idx;
-          const isCompleted = currentActivityIdx !== null && idx < currentActivityIdx;
-          const isUpcoming = currentActivityIdx !== null && idx > currentActivityIdx;
-          const isOverdue = scheduleStatus?.isBehindSchedule && isCurrent;
+          const isCurrent = isTracking && currentActivityIdx === idx;
+          const isCompleted = isTracking && currentActivityIdx !== null && idx < currentActivityIdx;
+          const isUpcoming = isTracking && currentActivityIdx !== null && idx > currentActivityIdx;
+          const isOverdue = isTracking && scheduleStatus?.isBehindSchedule && isCurrent;
           
           // Determine the visual state
           let containerClass = "mb-6 p-4 rounded-lg border";
@@ -727,21 +835,21 @@ export default function Explore() {
           if (isCompleted) {
             containerClass += " bg-gray-100 border-gray-300";
             textClass += " text-gray-600";
-            statusIndicator = "✅ ";
+            
           } else if (isCurrent) {
             if (isOverdue) {
               containerClass += " bg-red-100 border-2 border-red-500";
               textClass += " text-red-700";
-              statusIndicator = "⚠️ ";
+              
             } else {
               containerClass += " bg-green-100 border-2 border-green-500";
               textClass += " text-green-700";
-              statusIndicator = "📍 ";
+              
             }
           } else if (isUpcoming) {
             containerClass += " bg-blue-50 border-blue-200";
             textClass += " text-blue-700";
-            statusIndicator = "⏰ ";
+            
           } else {
             containerClass += " bg-white border-gray-200";
             textClass += " text-gray-900";
@@ -749,22 +857,17 @@ export default function Explore() {
           
           return (
             <View key={`${item.name}-${idx}`} className={containerClass}>
-              <Text className={textClass}>
-                {statusIndicator}{item.start_time} – {item.end_time} {item.name}
-              </Text>
+              <Text className={textClass}>{item.start_time} – {item.end_time} {item.name}</Text>
 
               <Text className="text-sm text-gray-600 capitalize">
                 {item.category ?? "activity"}
               </Text>
 
               {/* Current Activity Status */}
-              {isCurrent && (
+              {isTracking && isCurrent && (
                 <View className="mt-2 p-2 rounded bg-blue-50 border border-blue-200">
                   <Text className="text-sm font-rubik-semibold text-blue-800">
-                    {isOverdue 
-                      ? `⚠️ You're ${scheduleStatus?.delayMinutes || 0} minutes behind schedule`
-                      : "📍 You are here - Current activity"
-                    }
+                    {isOverdue ? `You are ${scheduleStatus?.delayMinutes || 0} minutes behind schedule` : "You are here - Current activity"}
                   </Text>
                   {isOverdue && (
                     <Text className="text-xs text-blue-600 mt-1">
@@ -775,20 +878,16 @@ export default function Explore() {
               )}
 
               {/* Completed Activity Status */}
-              {isCompleted && (
+              {isTracking && isCompleted && (
                 <View className="mt-2 p-2 rounded bg-gray-50 border border-gray-200">
-                  <Text className="text-sm font-rubik-semibold text-gray-600">
-                    ✅ Completed
-                  </Text>
+                  <Text className="text-sm font-rubik-semibold text-gray-600">Completed</Text>
                 </View>
               )}
 
               {/* Upcoming Activity Status */}
-              {isUpcoming && (
+              {isTracking && isUpcoming && (
                 <View className="mt-2 p-2 rounded bg-blue-50 border border-blue-200">
-                  <Text className="text-sm font-rubik-semibold text-blue-700">
-                    ⏰ Upcoming
-                  </Text>
+                  <Text className="text-sm font-rubik-semibold text-blue-700">Upcoming</Text>
                   {scheduleStatus?.nextActivityStart && idx === currentActivityIdx + 1 && (
                     <Text className="text-xs text-blue-600 mt-1">
                       Next activity starts at {scheduleStatus.nextActivityStart}
@@ -823,17 +922,13 @@ export default function Explore() {
 
               {item.weatherWarning && (
                 <View className="mt-2 p-2 bg-yellow-100 rounded border border-yellow-300">
-                  <Text className="text-sm text-yellow-800 font-rubik-semibold">
-                    ⚠️ {item.weatherWarning}
-                  </Text>
+                  <Text className="text-sm text-yellow-800 font-rubik-semibold">{item.weatherWarning}</Text>
                 </View>
               )}
 
               {item.adaptationReason && (
                 <View className="mt-2 p-2 bg-blue-100 rounded border border-blue-300">
-                  <Text className="text-sm text-blue-800 font-rubik-semibold">
-                    🔄 Weather Adaptation: {item.adaptationReason}
-                  </Text>
+                  <Text className="text-sm text-blue-800 font-rubik-semibold">Weather Adaptation: {item.adaptationReason}</Text>
                   {item.originalActivity && (
                     <Text className="text-xs text-blue-600 mt-1">
                       Originally: {item.originalActivity}
@@ -844,9 +939,7 @@ export default function Explore() {
 
               {item.replacementReason && (
                 <View className="mt-2 p-2 bg-purple-100 rounded border border-purple-300">
-                  <Text className="text-sm text-purple-800 font-rubik-semibold">
-                    ⏰ Schedule Adjustment: {item.replacementReason}
-                  </Text>
+                  <Text className="text-sm text-purple-800 font-rubik-semibold">Schedule Adjustment: {item.replacementReason}</Text>
                   {item.originalActivity && (
                     <Text className="text-xs text-purple-600 mt-1">
                       Originally: {item.originalActivity}
@@ -857,9 +950,7 @@ export default function Explore() {
 
               {item.rescheduled && (
                 <View className="mt-2 p-2 bg-orange-100 rounded border border-orange-300">
-                  <Text className="text-sm text-orange-800 font-rubik-semibold">
-                    📅 Rescheduled due to delay
-                  </Text>
+                  <Text className="text-sm text-orange-800 font-rubik-semibold">Rescheduled due to delay</Text>
                 </View>
               )}
             </View>
