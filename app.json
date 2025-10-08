@@ -35,6 +35,7 @@
           "enableFullScreenImage_Legacy": true
         }
       ],
+      "expo-health-connect",
       [
         "expo-font",
         {

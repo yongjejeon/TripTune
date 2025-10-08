@@ -64,16 +64,7 @@ const TabsLayout = () => {
           ),
         }}
       />
-      <Tabs.Screen
-        name="preference"
-        options={{
-          title: 'Preference',
-          headerShown: false,
-          tabBarIcon: ({ focused }) => (
-            <TabIcon icon={icons.home} focused={focused} title="Preference" />
-          ),
-        }}
-      />
+      {/* Preference tab removed (route no longer exists) */}
       <Tabs.Screen
         name="explore"
         options={{

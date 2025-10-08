@@ -1,50 +1,44 @@
-# Welcome to your Expo app 👋
+## TripTune
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+TripTune is an Expo-based React Native application for planning and adapting multi-day travel itineraries. It integrates AI itinerary generation, weather-aware adaptation, schedule tracking, and a fatigue model informed by health and activity data.
 
-## Get started
+### High-level architecture
 
-1. Install dependencies
+- `app/` – UI, navigation, and screens using Expo Router (file-based routing).
+  - `app/(root)/(tabs)/index.tsx` – Integrated onboarding: personal info, dates, accommodation (GPS or city), and place selection with smart preference inference.
+  - `app/(root)/(tabs)/explore.tsx` – Core planning screen: generate single-day and multi-day trips, schedule tracking, weather checks, and itinerary display.
+  - `app/sign-in.tsx` – Sign-in screen; after sign-in routes to Galaxy Watch onboarding.
+  - `app/(root)/onboarding/` – Galaxy Watch connection and heart-rate capture.
+- `lib/` – Domain logic and integrations.
+  - `lib/itineraryAI.ts` – GPT-driven single-day itinerary generation (duplicate-avoidance, anchors).
+  - `lib/multidayPlanner.ts` – Multi-day orchestration, anchor assignment, duplicate prevention, enrichment and optimization.
+  - `lib/itineraryOptimizer.ts` – Route optimization, realistic timing, and smart meal insertion.
+  - `lib/routeOptimizer.ts` – Travel graph and path construction.
+  - `lib/weatherAware.ts` – Weather fetch and itinerary adaptation rules.
+  - `lib/scheduleManager.ts` – Detect behind-schedule status and propose adjustments.
+  - `lib/google.ts` – Google Places API (with photos), enriched place objects.
+  - `lib/preferences.ts` – Smart preference inference from selected places; avoid list helpers.
+  - `lib/health.ts` – Heart rate access helpers and aggressive polling strategies.
+  - `lib/global-provider.tsx` – App-wide state provider.
 
-   ```bash
-   npm install
-   ```
+### Single-terminal launch (recommended)
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+Run both commands in the same terminal, in order. The second command will auto-start Metro if it is not running and stream logs in the same window.
 
 ```bash
-npm run reset-project
+pkill -f "expo start" || true
+npx expo run:android
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Notes:
+- If you see “Waiting on http://localhost:8081” for too long, it usually means another Metro is blocking the default port. Re-run the two commands above to clear stale Metro and start fresh.
+- To view native and JavaScript logs regardless of Metro, you can use:
 
-## Learn more
+```bash
+adb logcat *:S ReactNativeJS:V ReactNative:V Expo:V
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+### Notes
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- This project uses Expo Router and requires the app to be launched via a development build (not Expo Go) for full feature support.
+- Ensure the required environment variables are present (.env.local) for Google Places and OpenWeather integrations.

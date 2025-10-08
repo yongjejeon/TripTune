@@ -64,24 +64,74 @@ export const buildTravelGraph = async (
   userCoords: { lat: number; lng: number },
   places: any[]
 ) => {
-  const graph: Record<string, Record<string, { time: number; instructions: string }>> = {};
+  try {
+    console.log("🗺️ Building travel graph for", places.length, "places");
+    
+    const graph: Record<string, Record<string, { time: number; instructions: string }>> = {};
+    const allNodes = [{ name: "UserStart", ...userCoords }, ...places];
 
-  const allNodes = [{ name: "UserStart", ...userCoords }, ...places];
-
-  for (let i = 0; i < allNodes.length; i++) {
-    graph[allNodes[i].name] = {};
-    for (let j = 0; j < allNodes.length; j++) {
-      if (i === j) continue;
-
-      const { duration, instructions } = await getTravelTime(allNodes[i], allNodes[j]);
-      graph[allNodes[i].name][allNodes[j].name] = {
-        time: duration,
-        instructions,
-      };
+    // Limit the number of places to prevent API rate limits and long processing times
+    const maxPlaces = 8; // Reasonable limit for multi-day planning
+    const limitedNodes = allNodes.slice(0, maxPlaces + 1); // +1 for UserStart
+    
+    if (allNodes.length > maxPlaces + 1) {
+      console.warn(`⚠️ Limiting travel graph to ${maxPlaces} places to prevent API overload`);
     }
-  }
 
-  return { graph, nodes: allNodes };
+    for (let i = 0; i < limitedNodes.length; i++) {
+      const nodeName = limitedNodes[i].name || `Place_${i}`;
+      graph[nodeName] = {};
+      
+      for (let j = 0; j < limitedNodes.length; j++) {
+        if (i === j) continue;
+
+        try {
+          const { duration, instructions } = await getTravelTime(limitedNodes[i], limitedNodes[j]);
+          const targetName = limitedNodes[j].name || `Place_${j}`;
+          
+          graph[nodeName][targetName] = {
+            time: duration,
+            instructions,
+          };
+          
+          // Add small delay to prevent API rate limiting
+          if (i > 0 || j > 1) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        } catch (error) {
+          console.warn(`⚠️ Failed to get travel time from ${nodeName} to ${limitedNodes[j].name}:`, error);
+          const targetName = limitedNodes[j].name || `Place_${j}`;
+          graph[nodeName][targetName] = {
+            time: 15 * 60, // 15 minutes fallback
+            instructions: "Estimated travel time",
+          };
+        }
+      }
+    }
+
+    console.log("✅ Travel graph built successfully");
+    return { graph, nodes: limitedNodes };
+  } catch (error) {
+    console.error("❌ Failed to build travel graph:", error);
+    // Return a minimal fallback graph
+    const fallbackGraph: Record<string, Record<string, { time: number; instructions: string }>> = {};
+    const allNodes = [{ name: "UserStart", ...userCoords }, ...places.slice(0, 5)];
+    
+    for (let i = 0; i < allNodes.length; i++) {
+      const nodeName = allNodes[i].name || `Place_${i}`;
+      fallbackGraph[nodeName] = {};
+      for (let j = 0; j < allNodes.length; j++) {
+        if (i === j) continue;
+        const targetName = allNodes[j].name || `Place_${j}`;
+        fallbackGraph[nodeName][targetName] = {
+          time: 15 * 60, // 15 minutes fallback
+          instructions: "Estimated travel time",
+        };
+      }
+    }
+    
+    return { graph: fallbackGraph, nodes: allNodes };
+  }
 };
 
 

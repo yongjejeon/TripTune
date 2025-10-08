@@ -1,27 +1,32 @@
-import { login } from "@/lib/appwrite";
 import { useGlobalContext } from "@/lib/global-provider";
-import { Redirect } from "expo-router";
+import { useRouter } from "expo-router";
 import React from 'react';
-import { Alert, Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import GoogleIcon from '../assets/icons/google.png';
 
 const SignIn = () => {
-    const {refetch, loading, isLoggedIn} = useGlobalContext();
+    const {refetch, loading, isLoggedIn, setIsLoggedIn} = useGlobalContext();
+    const router = useRouter();
 
-    if (!loading && isLoggedIn) {
-        return <Redirect href="/" />;
-    }
-    const handleLogin = async () => {
-        const result = await login();
+    // if (!loading && isLoggedIn) {
+    //     return <Redirect href="/" />;
+    // }
+    const handleLogin = () => {
+        // After sign-in, go to Galaxy Watch onboarding
+        router.replace("/onboarding/watch");
+      };
+  
+    // const handleLogin = async () => {
+    //     const result = await login();
 
-        if(result){
-            console.log('Login Success');
-            refetch();
-        } else{
-            Alert.alert('Error', 'Failed to login');
-        }
-    };
+    //     if(result){
+    //         console.log('Login Success');
+    //         refetch();
+    //     } else{
+    //         Alert.alert('Error', 'Failed to login');
+    //     }
+    // };
     return (
         <SafeAreaView className= "bg-white h-full">
             <ScrollView contentContainerClassName="h-full">
