@@ -11,10 +11,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
     ActivityIndicator,
     Alert,
+    Image,
     ScrollView,
     Text,
     TouchableOpacity,
-    View
+    View,
 } from "react-native";
 // import MapView, { Marker, Polyline } from 'react-native-maps';
 
@@ -152,6 +153,8 @@ export default function Explore() {
   const [lastScheduleCheck, setLastScheduleCheck] = useState<number>(0);
   const [currentTripDayIndex, setCurrentTripDayIndex] = useState<number | null>(null);
   const [lastDateNotice, setLastDateNotice] = useState<number>(0);
+  const [replaceContext, setReplaceContext] = useState<{ dayIndex: number; itemIndex: number } | null>(null);
+  const [replacementSuggestions, setReplacementSuggestions] = useState<any[] | null>(null);
 
   // tracking state
   const [isTracking, setIsTracking] = useState(false);
@@ -445,6 +448,97 @@ export default function Explore() {
       Alert.alert("Error", "Failed to load saved trip");
     }
   };
+
+  // ---------------- Multi-day: Replace item with recommendations ----------------
+  const getUsedPlaceNamesFromTripPlan = useCallback((): Set<string> => {
+    const used = new Set<string>();
+    if (!tripPlan?.days?.length) return used;
+    tripPlan.days.forEach((d: any) => {
+      (d.itinerary || []).forEach((it: any) => {
+        if (it?.name) used.add(it.name);
+      });
+    });
+    return used;
+  }, [tripPlan]);
+
+  const recommendReplacements = useCallback(async (lat: number, lng: number, excludeNames: Set<string>, dayIndex?: number) => {
+    // Prefer precomputed pool for the day for speed and relevance
+    if (typeof dayIndex === 'number' && tripPlan?.days?.[dayIndex]?.pool?.length) {
+      const pool = tripPlan.days[dayIndex].pool as any[];
+      const eligible = pool.filter(p => p?.name && !excludeNames.has(p.name));
+      return eligible.slice(0, 3);
+    }
+    // Fallback to live fetch
+    try {
+      const results = await fetchPlacesByCoordinates(lat, lng);
+      const eligible = results
+        .filter((p: any) => p?.name && !excludeNames.has(p.name))
+        .sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0));
+      return eligible.slice(0, 3);
+    } catch (e) {
+      console.error("recommendReplacements failed", e);
+      return [];
+    }
+  }, [tripPlan]);
+
+  const handleReplaceMultiDayItem = useCallback(async (dayIndex: number, itemIndex: number) => {
+    try {
+      if (!tripPlan?.days?.[dayIndex]) return;
+      const day = tripPlan.days[dayIndex];
+      const item = day.itinerary[itemIndex];
+      if (!item) return;
+
+      const baseLat = item.lat ?? item.coordinates?.lat ?? userLocation?.lat;
+      const baseLng = item.lng ?? item.coordinates?.lng ?? userLocation?.lng;
+      if (baseLat == null || baseLng == null) {
+        Alert.alert("Location needed", "Cannot suggest replacements without a reference location.");
+        return;
+      }
+
+      const exclude = getUsedPlaceNamesFromTripPlan();
+      const suggestions = await recommendReplacements(baseLat, baseLng, exclude, dayIndex);
+      setReplaceContext({ dayIndex, itemIndex });
+      setReplacementSuggestions(suggestions);
+    } catch (e: any) {
+      console.error("handleReplaceMultiDayItem failed", e?.message || e);
+      Alert.alert("Error", "Failed to replace item.");
+    }
+  }, [tripPlan, userLocation, getUsedPlaceNamesFromTripPlan, recommendReplacements]);
+
+  const applyReplacementSelection = useCallback(async (dayIndex: number, itemIndex: number, p: any) => {
+    if (!tripPlan?.days?.[dayIndex]) return;
+    const day = tripPlan.days[dayIndex];
+    const item = day.itinerary[itemIndex];
+    if (!item) return;
+    const replacement = {
+      ...item,
+      name: p.name,
+      category: p.category ?? item.category ?? "activity",
+      coordinates: { lat: p.lat, lng: p.lng },
+      lat: p.lat,
+      lng: p.lng,
+      place_id: p.place_id,
+      photoUrl: p.photoUrl,
+      rating: p.rating,
+      user_ratings_total: p.user_ratings_total,
+    };
+    const newPlan = { ...tripPlan };
+    const dayCopy = { ...newPlan.days[dayIndex] };
+    const itCopy = [...dayCopy.itinerary];
+    itCopy[itemIndex] = replacement;
+    dayCopy.itinerary = itCopy;
+    newPlan.days = [...newPlan.days];
+    newPlan.days[dayIndex] = dayCopy;
+    setTripPlan(newPlan);
+    await AsyncStorage.setItem("savedTripPlan", JSON.stringify(newPlan));
+    setReplaceContext(null);
+    setReplacementSuggestions(null);
+  }, [tripPlan]);
+
+  const cancelReplacement = useCallback(() => {
+    setReplaceContext(null);
+    setReplacementSuggestions(null);
+  }, []);
 
   const handleOptimize = async () => {
     try {
@@ -1229,6 +1323,16 @@ export default function Explore() {
                             {item.reason}
                           </Text>
                         )}
+
+                        {/* Personalize: Replace action */}
+                        <View className="mt-3 flex-row gap-3">
+                          <TouchableOpacity
+                            onPress={() => handleReplaceMultiDayItem(dayIndex, idx)}
+                            className="px-3 py-2 rounded bg-primary-100"
+                          >
+                            <Text className="text-white text-xs font-rubik-semibold">Replace</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     ))
                   ) : (
@@ -1240,6 +1344,43 @@ export default function Explore() {
                   )}
                 </View>
               ))}
+
+              {/* Replacement Suggestions Drawer */}
+              {replaceContext && Array.isArray(replacementSuggestions) && (
+                <View className="mt-2 p-4 rounded-xl bg-white border border-gray-200">
+                  <View className="flex-row justify-between items-center mb-3">
+                    <Text className="text-lg font-rubik-bold text-gray-900">Choose a replacement</Text>
+                    <TouchableOpacity onPress={cancelReplacement} className="px-3 py-2 rounded bg-gray-200">
+                      <Text className="text-gray-700 text-xs font-rubik-semibold">Close</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View className="flex-row flex-wrap justify-between">
+                    {replacementSuggestions.map((p: any) => (
+                      <TouchableOpacity
+                        key={p.place_id}
+                        onPress={() => applyReplacementSelection(replaceContext.dayIndex, replaceContext.itemIndex, p)}
+                        style={{ width: '48%', marginBottom: 12 }}
+                        className="rounded-xl overflow-hidden border border-gray-200"
+                      >
+                        {p.photoUrl ? (
+                          <View>
+                            <Image source={{ uri: p.photoUrl }} style={{ width: '100%', height: 100 }} resizeMode="cover" />
+                          </View>
+                        ) : (
+                          <View className="w-full h-24 bg-gray-100 items-center justify-center">
+                            <Text className="text-gray-500 text-xs">No Image</Text>
+                          </View>
+                        )}
+                        <View className="p-3 bg-white">
+                          <Text className="font-rubik-semibold text-sm" numberOfLines={2}>{p.name}</Text>
+                          <Text className="text-gray-600 text-xs" numberOfLines={1}>{p.vicinity}</Text>
+                          <Text className="text-gray-600 text-xs mt-1">Rating: {p.rating ?? 'N/A'}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
             </View>
           ) : null}
 

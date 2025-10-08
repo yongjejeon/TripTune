@@ -43,7 +43,7 @@ type ItinItem = {
   estimated_duration: number; travel_time_minutes: number;
   travel_instructions?: string; reason?: string;
 };
-export type DayPlan = { date: string; anchorIds: string[]; itinerary: ItinItem[] };
+export type DayPlan = { date: string; anchorIds: string[]; itinerary: ItinItem[]; pool?: any[] };
 export type TripPlan = { startDate: string; endDate: string; homebase: LatLng; days: DayPlan[] };
 
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -330,7 +330,27 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
         });
 
         const optimized = await reconstructItinerary(homebase, enrichedList);
-        outDays.push({ date, anchorIds, itinerary: optimized });
+
+        // Build leftover pool for quick replacements (prioritized, unused for this day and globally)
+        const optimizedIds = new Set<string>(optimized.map((it: any) => it.place_id).filter(Boolean));
+        const dayLeftover = availablePlaces
+          .filter(p => !optimizedIds.has(p.place_id) && !used.has(p.place_id))
+          .slice() // copy
+          .sort((a, b) => (b._prefScore ?? b.score ?? 0) - (a._prefScore ?? a.score ?? 0));
+
+        const pool = dayLeftover.slice(0, 30).map(p => ({
+          place_id: p.place_id,
+          name: p.name,
+          lat: p.lat ?? p.geometry?.location?.lat ?? null,
+          lng: p.lng ?? p.geometry?.location?.lng ?? null,
+          photoUrl: p.photoUrl ?? null,
+          rating: p.rating ?? null,
+          vicinity: p.vicinity ?? "",
+          category: p.normalizedCategory || p.category || "attraction",
+          user_ratings_total: p.user_ratings_total ?? null,
+        }));
+
+        outDays.push({ date, anchorIds, itinerary: optimized, pool });
         
         console.log(`✅ Day ${date} planned: ${optimized.length} activities`);
       } catch (dayError) {
