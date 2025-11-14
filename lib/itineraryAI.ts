@@ -1,4 +1,4 @@
-// lib/itineraryAI.ts — robust 1-day itinerary generator (uses only your places)
+// lib/itineraryAI.ts - robust 1-day itinerary generator (uses only your places)
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import OpenAI from "openai";
 
@@ -77,14 +77,14 @@ Hard rules you MUST follow:
 - Use ONLY places provided in the user input ("places"). Do NOT invent place names or addresses.
 - Prefer the user's must-see items (if present in places); schedule them early when feasible.
 - Respect opening hours if provided; if unknown, state "unknown" in reason and avoid confident claims.
-- Do NOT invent specific bus/metro route numbers. Give mode suggestions + rough minutes only (e.g., "Walk ~8 min", "Taxi ~12 min", "Bus/Metro ~18–25 min").
+- Do NOT invent specific bus/metro route numbers. Give mode suggestions and rough minutes only (e.g., "Walk ~8 min", "Taxi ~12 min", "Bus/Metro ~18-25 min"). Do NOT invent route numbers.
 - Output VALID JSON ONLY that conforms to the provided schema. No extra prose.
 
 Soft rules:
-- Start near the user's coordinates; keep hops compact (ideally ≤ 25 min each).
+- Start near the user's coordinates; keep hops compact (ideally <= 25 min each).
 - Cluster stops by proximity to reduce backtracking.
 - Allocate more time for large museums/parks.
-- Add generic Lunch and Dinner time blocks (no venue names; 60–90 min each).
+- Add generic Lunch and Dinner time blocks (no venue names; 60-90 min each).
 `.trim();
 
   const userPrompt = `
@@ -113,11 +113,11 @@ ${JSON.stringify(mustSee, null, 2)}
        ` : ''}
        ` : ''}
 
-Places (ranked compact list; you may choose any subset of 5–6 stops from these only):
+Places (ranked compact list; you may choose any subset of 5-6 stops from these only):
 ${JSON.stringify(compactList, null, 2)}
 
        CRITICAL RULES:
-       1) You MUST select 5–6 stops from "places" to create a full day itinerary. Do NOT select fewer than 5 places.
+       1) You MUST select 5-6 stops from "places" to create a full day itinerary. Do NOT select fewer than 5 places.
        2) Use the EXACT "name" field from the places list - do NOT use place_id as the name.
        3) Match each chosen stop by exact "place_id" when present, else exact "name".
        4) IMPORTANT: Only select places that are in the "places" list above. Do NOT select any place not explicitly listed.
@@ -129,8 +129,8 @@ ${JSON.stringify(compactList, null, 2)}
           - If closed all day, skip it unless it's must-see (then schedule a short external photo-stop and explain in reason).
        9) For travel between stops, provide:
           - "travel_time_minutes": integer minutes
-          - "travel_instructions": just mode+time (e.g., "Walk ~10 min", "Taxi ~15–20 min", "Bus/Metro ~18–25 min; check Google Maps"). Do NOT invent route numbers.
-       10) Include fixed Lunch and Dinner blocks (category "meal", 60–90 min each) at reasonable times.
+          - "travel_instructions": just mode+time (e.g., "Walk ~10 min", "Taxi ~15-20 min", "Bus/Metro ~18-25 min; check Google Maps"). Do NOT invent route numbers.
+       10) Include fixed Lunch and Dinner blocks (category "meal", 60-90 min each) at reasonable times.
        11) Use integer minutes for "estimated_duration".
        12) Start around 09:00 local time and end by early evening unless hours force changes.
        13) IMPORTANT: You must create a complete day itinerary with 5-6 activities plus meals. Do not create incomplete itineraries.
@@ -192,7 +192,7 @@ Output JSON ONLY with this schema:
   }
 
   // Fallback (keeps app from crashing if model returns bad JSON)
-  console.warn("⚠️ AI returned non-JSON or invalid JSON. Raw:", raw);
+  console.warn("AI returned non-JSON or invalid JSON. Raw:", raw);
   return {
     itinerary: [
       {
@@ -206,7 +206,7 @@ Output JSON ONLY with this schema:
         end_time: "09:15",
         estimated_duration: 15,
         travel_time_minutes: 0,
-        travel_instructions: "—",
+        travel_instructions: "-",
         reason: "Model output was not valid JSON; please try again.",
       },
     ],

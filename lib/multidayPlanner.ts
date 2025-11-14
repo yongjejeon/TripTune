@@ -45,6 +45,8 @@ type ItinItem = {
 };
 export type DayPlan = { date: string; anchorIds: string[]; itinerary: ItinItem[]; pool?: any[] };
 export type TripPlan = { startDate: string; endDate: string; homebase: LatLng; days: DayPlan[] };
+export type MultiDayProgressUpdate = { stage: string; message: string; detail?: string; progress?: number };
+const MAX_DAY_CANDIDATES = 16;
 
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 const buildDaysLocal = (sISO: string, eISO: string) => {
@@ -77,7 +79,7 @@ function draftAnchors(days: string[], places: any[], mustIds: Set<string>, maxPe
       anchors[day].push(place.place_id);
       used.add(place.place_id);
       mustSeeIndex++;
-      console.log(`⚓ Assigned must-see "${place.name}" to day ${day}`);
+      console.log(`Assigned must-see "${place.name}" to day ${day}`);
     }
   }
   
@@ -98,11 +100,11 @@ function draftAnchors(days: string[], places: any[], mustIds: Set<string>, maxPe
       anchors[day].push(place.place_id);
       used.add(place.place_id);
       placeIndex++;
-      console.log(`⚓ Assigned top place "${place.name}" to day ${day}`);
+      console.log(`Assigned top place "${place.name}" to day ${day}`);
     }
   }
   
-  console.log("📊 Anchor assignment summary:", {
+  console.log("Anchor assignment summary:", {
     totalDays: days.length,
     daysWithAnchors: Object.values(anchors).filter(dayAnchors => dayAnchors.length > 0).length,
     totalAnchors: Object.values(anchors).reduce((sum, dayAnchors) => sum + dayAnchors.length, 0),
@@ -112,10 +114,15 @@ function draftAnchors(days: string[], places: any[], mustIds: Set<string>, maxPe
   return anchors;
 }
 
-export async function planMultiDayTrip(): Promise<TripPlan> {
+export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayProgressUpdate) => void }): Promise<TripPlan> {
   try {
-    console.log("🚀 Starting multi-day trip planning...");
-    
+    console.log("Starting multi-day trip planning...");
+    const emit = (stage: string, message: string, progress?: number, detail?: string) => {
+      options?.onStatus?.({ stage, message, progress, detail });
+    };
+
+    emit("init", "Reading trip setup...", 0.02);
+
     // 1) read context
     const rawCtx = await AsyncStorage.getItem("tripContext");
     if (!rawCtx) {
@@ -125,6 +132,9 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
     const ctx = JSON.parse(rawCtx);
     const startDate: string = ctx.startDate;
     const endDate: string = ctx.endDate;
+    const itineraryStartTime: string | undefined =
+      typeof ctx.itineraryStartTime === "string" ? ctx.itineraryStartTime : undefined;
+    emit("context", "Trip details loaded", 0.08, `${startDate} to ${endDate}`);
     
     if (!startDate || !endDate) {
       throw new Error("Invalid trip dates. Please set start and end dates.");
@@ -132,28 +142,34 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
     
     const days: string[] = (ctx.days && ctx.days.length) ? ctx.days : buildDaysLocal(startDate, endDate);
     const homebase: LatLng = ctx.homebase;
+    emit("context", `Planning ${days.length} day${days.length === 1 ? "" : "s"}`, 0.12);
     
     if (!homebase?.lat || !homebase?.lng) {
       throw new Error("Homebase coordinates missing. Please detect your location first.");
     }
 
-    console.log("📅 Trip context:", { startDate, endDate, days: days.length, homebase });
+    console.log("Trip context:", { startDate, endDate, days: days.length, homebase });
 
     // 2) prefs + places once
+    emit("preferences", "Loading saved preferences...", 0.18);
     const prefs = await getUserPreferences();
-    console.log("👤 User preferences loaded:", { 
+    console.log("User preferences loaded:", { 
       hasPrefs: !!prefs.preferences, 
       mustSeeCount: prefs.mustSee?.length || 0 
     });
-    
+    emit("preferences", `Preferences ready (${prefs.mustSee?.length || 0} must-see selections)`, 0.22);
+
+    emit("places", "Finding top attractions near your stay...", 0.28);
     const rawPlaces = await fetchPlacesByCoordinates(homebase.lat, homebase.lng);
-    console.log("📍 Places fetched:", rawPlaces.length);
+    console.log("Places fetched:", rawPlaces.length);
+    emit("places", `Fetched ${rawPlaces.length} places`, 0.34);
 
     if (!rawPlaces || rawPlaces.length === 0) {
       throw new Error("No places found near your location. Please try a different location.");
     }
 
     // Filter out avoided places
+    emit("filter", "Applying your avoid list...", 0.38);
     const avoidPlaces = prefs?.avoidPlaces || [];
     const filteredPlaces = rawPlaces.filter(place => {
       const placeName = place.name?.toLowerCase() || '';
@@ -168,16 +184,18 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
       });
       
       if (shouldAvoid) {
-        console.log(`🚫 Filtering out avoided place: "${place.name}"`);
+        console.log(`Filtering out avoided place: "${place.name}"`);
         return false;
       }
       return true;
     });
     
-    console.log(`🔍 Filtered places: ${rawPlaces.length} → ${filteredPlaces.length} (removed ${rawPlaces.length - filteredPlaces.length} avoided places)`);
+    console.log(`Filtered places: ${rawPlaces.length} to ${filteredPlaces.length} (removed ${rawPlaces.length - filteredPlaces.length} avoided places)`);
+    emit("filter", `Filtered to ${filteredPlaces.length} candidate places`, 0.42);
     
     // Prioritize places based on user preferences
-    console.log("🔍 User preferences structure:", { 
+    emit("prioritize", "Prioritizing locations based on your interests...", 0.48);
+    console.log("User preferences structure:", { 
       hasPrefs: !!prefs, 
       hasPreferences: !!prefs?.preferences,
       preferencesType: typeof prefs?.preferences,
@@ -186,12 +204,15 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
     });
     
     const places = prioritizePlacesByPreferences(filteredPlaces, prefs);
-    console.log("🎯 Places prioritized by user preferences:", places.length);
+    console.log("Places prioritized by user preferences:", places.length);
+    emit("prioritize", `Top ${places.length} places prioritized`, 0.52);
 
     // 3) anchor assignment
+    emit("anchors", "Assigning must-see anchors for each day...", 0.56);
     const mustSet = new Set<string>(Array.isArray(prefs?.mustSee) ? prefs.mustSee : []);
     const anchorsByDay = draftAnchors(days, places, mustSet, 1);
-    console.log("⚓ Anchors assigned:", Object.keys(anchorsByDay).length, "days");
+    console.log("Anchors assigned:", Object.keys(anchorsByDay).length, "days");
+    emit("anchors", `Anchors ready for ${days.length} day${days.length === 1 ? "" : "s"}`, 0.6);
 
     // 4) Multi-stage per-day generation with explicit place filtering
     const used = new Set<string>();
@@ -202,11 +223,18 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
       dayAnchors.forEach(anchorId => used.add(anchorId));
     });
     
-    console.log("🔒 Pre-marked anchor places as used:", used.size);
+    console.log("Pre-marked anchor places as used:", used.size);
     
     for (let i = 0; i < days.length; i++) {
       const date = days[i];
-      console.log(`📋 Planning day ${i + 1}/${days.length}: ${date}`);
+      console.log(`Planning day ${i + 1}/${days.length}: ${date}`);
+      const dayStartProgress = 0.6 + (i / Math.max(days.length, 1)) * 0.3;
+      emit(
+        `day-${i + 1}`,
+        `Planning Day ${i + 1} (${date})`,
+        Math.min(dayStartProgress, 0.9),
+        `${used.size} places already reserved`
+      );
       
       const anchorIds = anchorsByDay[date] || [];
       
@@ -219,21 +247,41 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
         return false;
       });
       
-      console.log(`📊 Day ${date} available places: ${availablePlaces.length} places (${anchorIds.length} anchors)`);
-      console.log(`📋 Available places for day ${date}:`, availablePlaces.map(p => p.name));
+      console.log(`Day ${date} available places: ${availablePlaces.length} places (${anchorIds.length} anchors)`);
+      console.log(`Available places for day ${date}:`, availablePlaces.map(p => p.name));
 
-      if (availablePlaces.length === 0) {
-        console.warn(`⚠️ No places available for day ${date}, skipping...`);
+      const sortedByScore = availablePlaces
+        .slice()
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+      const candidateSet = new Map<string | undefined, any>();
+      sortedByScore.forEach((place) => {
+        if (!candidateSet.has(place.place_id)) {
+          candidateSet.set(place.place_id, place);
+        }
+      });
+
+      anchorIds.forEach((anchorId) => {
+        const anchorPlace = availablePlaces.find((p) => p.place_id === anchorId);
+        if (anchorPlace && !candidateSet.has(anchorId)) {
+          candidateSet.set(anchorId, anchorPlace);
+        }
+      });
+
+      const dayCandidates = Array.from(candidateSet.values()).slice(0, MAX_DAY_CANDIDATES);
+
+      if (!dayCandidates.length) {
+        console.warn(`No shortlisted candidates for day ${date}, skipping...`);
         outDays.push({ date, anchorIds, itinerary: [] });
         continue;
       }
 
       try {
         // Generate itinerary for this day using ONLY the available places
-        console.log(`🤖 Calling AI with ${availablePlaces.length} explicitly available places for day ${date}`);
-        const ai = await generateItinerary(availablePlaces, homebase, { 
+        console.log(`Calling AI with ${dayCandidates.length} shortlisted places for day ${date}`);
+        const ai = await generateItinerary(dayCandidates, homebase, { 
           date,
-          availablePlaces: availablePlaces.map(p => p.name), // Explicitly tell AI which places are available
+          availablePlaces: dayCandidates.map(p => p.name), // Explicitly tell AI which places are available
           usedPlaces: Array.from(used).map(id => {
             const place = places.find(p => p.place_id === id);
             return place ? place.name : id;
@@ -245,26 +293,26 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
         });
         let rawList: ItinItem[] = ai?.itinerary ?? [];
         
-        console.log(`🤖 AI returned ${rawList.length} items for day ${date}:`, 
+        console.log(`AI returned ${rawList.length} items for day ${date}:`, 
           rawList.map(item => `${item.name} (${item.category})`));
         
         if (!rawList || rawList.length === 0) {
-          console.warn(`⚠️ AI returned empty itinerary for day ${date}`);
+          console.warn(`AI returned empty itinerary for day ${date}`);
           outDays.push({ date, anchorIds, itinerary: [] });
           continue;
         }
 
         // Ensure we have enough activities for a full day
         if (rawList.length < 4) {
-          console.warn(`⚠️ Day ${date} has only ${rawList.length} activities, trying to add more...`);
+          console.warn(`Day ${date} has only ${rawList.length} activities, trying to add more...`);
           
           // Find additional places that haven't been used
-          const additionalPlaces = availablePlaces.filter(p => 
+          const additionalPlaces = dayCandidates.filter(p => 
             !rawList.some(item => item.place_id === p.place_id)
           ).slice(0, 4 - rawList.length);
           
           if (additionalPlaces.length > 0) {
-            console.log(`➕ Adding ${additionalPlaces.length} additional places to day ${date}:`, 
+            console.log(`Adding ${additionalPlaces.length} additional places to day ${date}:`, 
               additionalPlaces.map(p => p.name));
             additionalPlaces.forEach((place, index) => {
               rawList.push({
@@ -283,7 +331,7 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
               });
             });
           } else {
-            console.warn(`❌ No additional places available for day ${date}`);
+            console.warn(`No additional places available for day ${date}`);
           }
         }
         
@@ -297,7 +345,7 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
           }
         });
         
-        console.log(`🔒 Day ${date} used ${dayUsedPlaces.size} places:`, 
+        console.log(`Day ${date} used ${dayUsedPlaces.size} places:`, 
           Array.from(dayUsedPlaces).map(id => {
             const place = places.find(p => p.place_id === id);
             return place ? place.name : id;
@@ -325,11 +373,11 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
             };
           }
           
-          console.warn(`⚠️ Could not find coordinates for place: ${item.name}`);
+          console.warn(`Could not find coordinates for place: ${item.name}`);
           return item;
         });
 
-        const optimized = await reconstructItinerary(homebase, enrichedList);
+        const optimized = await reconstructItinerary(homebase, enrichedList, { startTime: itineraryStartTime });
 
         // Build leftover pool for quick replacements (prioritized, unused for this day and globally)
         const optimizedIds = new Set<string>(optimized.map((it: any) => it.place_id).filter(Boolean));
@@ -352,9 +400,15 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
 
         outDays.push({ date, anchorIds, itinerary: optimized, pool });
         
-        console.log(`✅ Day ${date} planned: ${optimized.length} activities`);
+        console.log(`Day ${date} planned: ${optimized.length} activities`);
+        const dayEndProgress = 0.6 + ((i + 1) / Math.max(days.length, 1)) * 0.3;
+        emit(
+          `day-${i + 1}-complete`,
+          `Day ${i + 1} planned (${optimized.length} activities)`,
+          Math.min(dayEndProgress, 0.92)
+        );
       } catch (dayError) {
-        console.error(`❌ Error planning day ${date}:`, dayError);
+        console.error(`Error planning day ${date}:`, dayError);
         // Continue with other days even if one fails
         outDays.push({ date, anchorIds, itinerary: [] });
       }
@@ -379,20 +433,22 @@ export async function planMultiDayTrip(): Promise<TripPlan> {
     });
     
     if (duplicates.length > 0) {
-      console.warn("⚠️ Duplicates detected in final result:", duplicates);
+      console.warn("Duplicates detected in final result:", duplicates);
     } else {
-      console.log("✅ No duplicates found in final result");
+      console.log("No duplicates found in final result");
     }
-    console.log("🎉 Multi-day trip planning completed:", {
+    emit("finalize", "Finalizing trip plan...", 0.96);
+    console.log("Multi-day trip planning completed:", {
       days: result.days.length,
       totalActivities: result.days.reduce((sum, day) => sum + day.itinerary.length, 0),
       uniquePlaces: allPlaceIds.size,
       duplicates: duplicates.length
     });
+    emit("complete", "Multi-day itinerary ready!", 1);
     
     return result;
   } catch (error) {
-    console.error("❌ Multi-day trip planning failed:", error);
+    console.error("Multi-day trip planning failed:", error);
     throw error;
   }
 }

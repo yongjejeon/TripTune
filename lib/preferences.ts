@@ -22,7 +22,7 @@ export type UserPreferences = {
 const KEY = "userPreferences";
 
 const DEFAULTS: UserPreferences = {
-  preferences: {},  // empty means "neutral" — google.ts will fall back gracefully
+  preferences: {},  // empty means "neutral" - google.ts will fall back gracefully
   mustSee: [],
   avoidPlaces: [],
 };
@@ -112,7 +112,7 @@ export async function addToAvoidList(placeNameOrId: string): Promise<void> {
   if (!avoidPlaces.includes(placeNameOrId)) {
     avoidPlaces.push(placeNameOrId);
     await updateUserPreferences({ avoidPlaces });
-    console.log(`🚫 Added "${placeNameOrId}" to avoid list`);
+    console.log(`Added "${placeNameOrId}" to avoid list`);
   }
 }
 
@@ -123,7 +123,7 @@ export async function removeFromAvoidList(placeNameOrId: string): Promise<void> 
   const current = await getUserPreferences();
   const avoidPlaces = current.avoidPlaces.filter(p => p !== placeNameOrId);
   await updateUserPreferences({ avoidPlaces });
-  console.log(`✅ Removed "${placeNameOrId}" from avoid list`);
+  console.log(`Removed "${placeNameOrId}" from avoid list`);
 }
 
 /**
@@ -138,10 +138,10 @@ export async function avoidTeamLabPhenomena(): Promise<void> {
  * Analyzes selected places to automatically determine category preferences
  */
 export function inferPreferencesFromSelections(selectedPlaces: any[]): Record<string, CategoryPref> {
-  console.log("🧠 Analyzing user selections to infer preferences...");
+  console.log("Analyzing user selections to infer preferences...");
   
   if (!selectedPlaces || selectedPlaces.length === 0) {
-    console.log("📝 No selections to analyze, using neutral preferences");
+    console.log("No selections to analyze, using neutral preferences");
     return {};
   }
 
@@ -158,7 +158,7 @@ export function inferPreferencesFromSelections(selectedPlaces: any[]): Record<st
     categoryDurations[category].push(duration);
   });
 
-  console.log("📊 Category analysis:", categoryCounts);
+  console.log("Category analysis:", categoryCounts);
 
   // Calculate preferences based on selection patterns
   const totalSelections = selectedPlaces.length;
@@ -189,7 +189,7 @@ export function inferPreferencesFromSelections(selectedPlaces: any[]): Record<st
       duration: Math.round(avgDuration)
     };
 
-    console.log(`🎯 ${category}: ${count}/${totalSelections} selections (${(selectionRatio * 100).toFixed(1)}%) → weight: ${weight}, duration: ${Math.round(avgDuration)}min`);
+    console.log(`${category}: ${count}/${totalSelections} selections (${(selectionRatio * 100).toFixed(1)}%) -> weight: ${weight}, duration: ${Math.round(avgDuration)}min`);
   });
 
   // Add complementary categories based on patterns
@@ -197,11 +197,11 @@ export function inferPreferencesFromSelections(selectedPlaces: any[]): Record<st
   complementaryCategories.forEach(({ category, weight, duration }) => {
     if (!preferences[category]) {
       preferences[category] = { weight, duration };
-      console.log(`🔗 Added complementary category: ${category} (weight: ${weight})`);
+      console.log(`Added complementary category: ${category} (weight: ${weight})`);
     }
   });
 
-  console.log("✅ Inferred preferences:", preferences);
+  console.log("Inferred preferences:", preferences);
   return preferences;
 }
 
@@ -212,25 +212,25 @@ export function inferPreferencesFromSelections(selectedPlaces: any[]): Record<st
 function inferComplementaryCategories(categoryCounts: Record<string, number>): Array<{category: string, weight: number, duration: number}> {
   const complementary: Array<{category: string, weight: number, duration: number}> = [];
   
-  // Museum → Art Gallery, Cultural Sites
+  // Museum -> Art Gallery, Cultural Sites
   if (categoryCounts.museum) {
     complementary.push({ category: 'art_gallery', weight: Math.max(3, categoryCounts.museum - 1), duration: 90 });
     complementary.push({ category: 'cultural_site', weight: Math.max(2, categoryCounts.museum - 2), duration: 75 });
   }
   
-  // Park → Outdoor Activities, Nature
+  // Park -> Outdoor Activities, Nature
   if (categoryCounts.park) {
     complementary.push({ category: 'outdoor_activity', weight: Math.max(3, categoryCounts.park - 1), duration: 120 });
     complementary.push({ category: 'nature', weight: Math.max(2, categoryCounts.park - 2), duration: 90 });
   }
   
-  // Landmark → Historical Sites, Architecture
+  // Landmark -> Historical Sites, Architecture
   if (categoryCounts.landmark) {
     complementary.push({ category: 'historical_site', weight: Math.max(3, categoryCounts.landmark - 1), duration: 75 });
     complementary.push({ category: 'architecture', weight: Math.max(2, categoryCounts.landmark - 2), duration: 60 });
   }
   
-  // Beach → Water Activities, Relaxation
+  // Beach -> Water Activities, Relaxation
   if (categoryCounts.beach) {
     complementary.push({ category: 'water_activity', weight: Math.max(3, categoryCounts.beach - 1), duration: 150 });
     complementary.push({ category: 'relaxation', weight: Math.max(2, categoryCounts.beach - 2), duration: 120 });

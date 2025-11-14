@@ -1,5 +1,11 @@
 // lib/google.ts
 import axios from "axios";
+import {
+  AI_BANNED_NAME_RE,
+  AI_CONFIDENCE_THRESHOLD,
+  AISuggestion,
+  fetchAISuggestions,
+} from "./aiShortlist";
 import { INDOOR_KEYWORDS, OUTDOOR_KEYWORDS } from "./constants";
 import {
   geoKeyFromLatLng,
@@ -11,6 +17,20 @@ import {
 } from "./localCache";
 import { getUserPreferences } from "./preferences";
 
+export type FetchProgressUpdate = {
+  stage: string;
+  message: string;
+  progress?: number;
+};
+
+export type FetchPlacesOptions = {
+  bypassSeedCache?: boolean;
+  cityName?: string;
+  countryName?: string;
+  tripWindow?: { start?: string; end?: string };
+  onProgress?: (update: FetchProgressUpdate) => void;
+};
+
 const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_API_KEY;
 
 // ====== Helpers: details & opening hours ======
@@ -19,7 +39,6 @@ const PLACE_DETAILS_FIELDS = [
   "current_opening_hours",
   "secondary_opening_hours",
   "utc_offset",
-  "utc_offset_minutes",
   "business_status",
   "formatted_address",
 ].join(",");
@@ -67,6 +86,189 @@ function fmtHHMM(hhmm: string) {
   return `${pad2(parseInt(h, 10))}:${m}`;
 }
 
+const NAME_NORMALIZE_RE = /[^a-z0-9]+/gi;
+
+const aiShortlistCache = new Map<string, { suggestions: AISuggestion[]; ts: number }>();
+const AI_SHORTLIST_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+const AI_CATEGORY_TAGS: Record<string, string> = {
+  landmark: "iconic",
+  museum: "culture",
+  cultural: "culture",
+  heritage: "heritage",
+  religious: "spiritual",
+  architecture: "architecture",
+  experience: "experience",
+  entertainment: "entertainment",
+  theme_park: "family",
+  adventure: "adventure",
+  outdoor: "outdoor",
+  nature: "outdoor",
+  park: "outdoor",
+  garden: "outdoor",
+  beach: "relax",
+  waterfront: "leisure",
+  island: "leisure",
+  wildlife: "wildlife",
+  zoo: "wildlife",
+  aquarium: "wildlife",
+  science: "learning",
+  history: "heritage",
+  observation: "viewpoint",
+};
+
+const AI_CATEGORY_DEFAULT_NOTES: Record<string, string> = {
+  landmark: "Signature city landmark",
+  museum: "World-class museum experience",
+  cultural: "Cultural arts and heritage space",
+  heritage: "Historic site showcasing local heritage",
+  religious: "Architectural religious landmark",
+  architecture: "Architectural icon with public access",
+  experience: "Immersive visitor experience",
+  entertainment: "Entertainment hub with visitor activities",
+  theme_park: "Family-friendly theme park",
+  adventure: "Adventure activities available",
+  outdoor: "Outdoor recreation area",
+  nature: "Nature experience with public trails",
+  park: "City park perfect for strolls",
+  garden: "Scenic gardens to explore",
+  beach: "Public beach for relaxation",
+  waterfront: "Waterfront promenade with dining",
+  island: "Island leisure district accessible to visitors",
+  wildlife: "Wildlife encounters available",
+  zoo: "Zoo with diverse animal exhibits",
+  aquarium: "Aquarium with marine life",
+  science: "Interactive science attraction",
+  history: "Historic venue for learning",
+  observation: "Observation point with panoramic views",
+};
+
+const AI_GOOGLE_TYPE_BLOCKLIST = new Set([
+  "shopping_mall",
+  "department_store",
+  "clothing_store",
+  "shoe_store",
+  "bridge",
+  "transit_station",
+  "bus_station",
+  "train_station",
+  "subway_station",
+  "light_rail_station",
+  "grocery_or_supermarket",
+  "supermarket",
+  "parking",
+  "parking_lot",
+  "car_dealer",
+  "car_rental",
+  "gas_station",
+  "bank",
+  "insurance_agency",
+  "real_estate_agency",
+  "storage",
+  "warehouse",
+  "police",
+  "city_hall",
+  "local_government_office",
+  "embassy",
+  "fire_station",
+  "courthouse",
+  "lawyer",
+  "accounting",
+  "physiotherapist",
+  "spa",
+  "beauty_salon",
+  "hair_care",
+  "lodging",
+]);
+
+const AI_GOOGLE_TYPE_OVERRIDES = new Set([
+  "tourist_attraction",
+  "museum",
+  "art_gallery",
+  "park",
+  "point_of_interest",
+  "place_of_worship",
+  "amusement_park",
+  "aquarium",
+  "zoo",
+  "natural_feature",
+  "campground",
+]);
+
+const AI_REMOTE_ISLAND_TYPES = new Set(["island", "natural_feature"]);
+const AI_REMOTE_KM_LIMIT = 140;
+const AI_MAX_DISTANCE_KM = 60; // cap general shortlist entries to ~1 hour drive
+
+type AISuggestionMeta = AISuggestion & { distanceKm?: number };
+
+function normalizeName(name?: string | null) {
+  if (!name) return "";
+  return name.toLowerCase().replace(NAME_NORMALIZE_RE, "").trim();
+}
+
+function getPlaceKey(place: any) {
+  if (!place) return "";
+  return place.place_id ?? normalizeName(place.name);
+}
+
+function resolveContextTag(category?: string | null) {
+  if (!category) return undefined;
+  return AI_CATEGORY_TAGS[category] ?? category;
+}
+
+function resolveDefaultNote(category?: string | null) {
+  if (!category) return undefined;
+  return AI_CATEGORY_DEFAULT_NOTES[category];
+}
+
+function shouldRejectByTypes(types?: string[] | null): boolean {
+  if (!types || !types.length) return false;
+  const normalized = types.map((t) => t?.toLowerCase?.() ?? t).filter(Boolean) as string[];
+  if (!normalized.length) return false;
+  const set = new Set(normalized);
+  const hasOverride = normalized.some((t) => AI_GOOGLE_TYPE_OVERRIDES.has(t));
+
+  for (const t of set) {
+    if (!AI_GOOGLE_TYPE_BLOCKLIST.has(t)) continue;
+    if (t === "bridge" || t === "shopping_mall" || t === "department_store" || t === "clothing_store" || t === "shoe_store") {
+      return true;
+    }
+    if (t === "lodging") {
+      if (hasOverride) continue;
+      return true;
+    }
+    if (!hasOverride) return true;
+  }
+
+  return false;
+}
+
+function isRemoteIslandSuggestion(
+  suggestion: AISuggestion,
+  place: any,
+  originLat: number,
+  originLng: number
+): boolean {
+  const placeLat = place?.geometry?.location?.lat;
+  const placeLng = place?.geometry?.location?.lng;
+  if (typeof placeLat !== "number" || typeof placeLng !== "number") return false;
+
+  const types = (place?.types ?? []).map((t: string) => t?.toLowerCase?.() ?? t) as string[];
+  const isIslandType = suggestion.category === "island" || types.some((t) => AI_REMOTE_ISLAND_TYPES.has(t));
+  if (!isIslandType) return false;
+
+  const distance = haversineKm(originLat, originLng, placeLat, placeLng);
+  if (!Number.isFinite(distance)) return false;
+
+  return distance > AI_REMOTE_KM_LIMIT;
+}
+
+function truncate(str: string | null | undefined, max = 160) {
+  if (!str) return undefined;
+  if (str.length <= max) return str;
+  return `${str.slice(0, max - 3)}...`;
+}
+
 type Period = { open: { day: number; time: string }; close?: { day: number; time: string } };
 
 function getTodaysPeriods(details: any, placeLocalNow: Date) {
@@ -86,7 +288,7 @@ function getTodaysPeriods(details: any, placeLocalNow: Date) {
   }));
 
   const todayText = spans.length
-    ? spans.map((s) => (s.close ? `${s.open}–${s.close}` : `${s.open}–late`)).join(", ")
+    ? spans.map((s) => (s.close ? `${s.open}-${s.close}` : `${s.open}-late`)).join(", ")
     : "Closed today";
 
   // Next open/close (absolute minutes since week start)
@@ -230,7 +432,6 @@ const ALLOW_TYPES = new Set<string>([
   "amusement_park",
   "stadium",
   "market",
-  "shopping_mall", // still blocked by default unless name indicates souk/market
   "point_of_interest",
 ]);
 
@@ -378,6 +579,37 @@ async function fetchPlacesByType(
   return (res.data?.results ?? []).slice(0, limit);
 }
 
+async function fetchPlaceByText(
+  query: string,
+  lat?: number,
+  lng?: number,
+  radius = 25000
+) {
+  if (!query) return null;
+  const params: Record<string, any> = {
+    query,
+    key: API_KEY,
+    language: "en",
+  };
+  if (lat != null && lng != null) {
+    params.location = `${lat},${lng}`;
+    params.radius = radius;
+  }
+
+  try {
+    const res = await axios.get(
+      "https://maps.googleapis.com/maps/api/place/textsearch/json",
+      { params }
+    );
+    const results = res.data?.results ?? [];
+    if (!results.length) return null;
+    return results[0];
+  } catch (error: any) {
+    console.warn("textsearch:error", { query, message: error?.message ?? error });
+    return null;
+  }
+}
+
 // ====== Scoring helpers ======
 function bayesianRating(R = 0, v = 0, mu = 4.2, m = 200) {
   const vv = Math.max(0, v | 0);
@@ -419,7 +651,7 @@ const DEBUG_LISTGEN = true;
 export const fetchPlacesByCoordinates = async (
   lat: number,
   lng: number,
-  opts?: { bypassSeedCache?: boolean }
+  opts: FetchPlacesOptions = {}
 ) => {
   const REQ = Math.floor(Math.random() * 1e6);
   const tag = (s: string) => `[fpc#${REQ}] ${s}`;
@@ -427,6 +659,14 @@ export const fetchPlacesByCoordinates = async (
   console.time(tag("total"));
 
   const prefs = (await getUserPreferences()) || null;
+
+  const emitProgress = (stage: string, message: string, progress?: number) => {
+    if (opts.onProgress) {
+      opts.onProgress({ stage, message, progress });
+    }
+  };
+
+  emitProgress("start", "Preparing nearby places", 0.05);
 
   const SEED_TYPES = [
     "tourist_attraction",
@@ -465,6 +705,7 @@ export const fetchPlacesByCoordinates = async (
       });
       if (fresh) {
         baseItems = cachedSeed.items;
+        emitProgress("seed-cache", "Using cached nearby places", 0.2);
         // SWR revalidate
         (async () => {
           try {
@@ -492,6 +733,7 @@ export const fetchPlacesByCoordinates = async (
             console.time(tag("seed:save"));
             await setSeed(geokey, filtered);
             console.timeEnd(tag("seed:save"));
+            emitProgress("seed-refresh", "Background refresh complete", 0.25);
           } catch {
             /* ignore background errors */
           }
@@ -500,7 +742,7 @@ export const fetchPlacesByCoordinates = async (
     }
   }
 
-  // 2) If bypass OR no fresh cache → fetch now
+  // 2) If bypass OR no fresh cache -> fetch now
   if (!baseItems) {
     console.time(tag("seed:fetch NOW"));
     const fetchedArrays = await Promise.all(SEED_TYPES.map((t) => fetchPlacesByType(lat, lng, t)));
@@ -517,7 +759,217 @@ export const fetchPlacesByCoordinates = async (
     console.timeEnd(tag("seed:save NOW"));
 
     baseItems = filtered;
+    emitProgress("seed-fetch", "Gathered nearby places", 0.35);
   }
+
+  if (!baseItems) {
+    baseItems = [];
+  }
+
+  if (baseItems.length) {
+    emitProgress("seed-ready", "Preparing AI shortlist", 0.45);
+  }
+
+  const shortlistMeta = new Map<string, AISuggestionMeta>();
+  let shortlistOrder: Map<string, number> | null = null;
+
+  console.log("ai-shortlist: request params", {
+    city: opts?.cityName,
+    country: opts?.countryName,
+    tripWindow: opts?.tripWindow,
+  });
+
+  const shortlistKey = [
+    lat.toFixed(3),
+    lng.toFixed(3),
+    (opts?.cityName ?? "").toLowerCase(),
+    opts?.tripWindow?.start ?? "",
+    opts?.tripWindow?.end ?? "",
+  ].join("|");
+
+  const allowCache = !opts?.bypassSeedCache;
+  let aiShortlist: AISuggestion[] = [];
+
+  if (allowCache && aiShortlistCache.has(shortlistKey)) {
+    const cached = aiShortlistCache.get(shortlistKey);
+    const fresh = !!cached && Date.now() - cached.ts < AI_SHORTLIST_CACHE_TTL_MS;
+    if (fresh) {
+      console.log("ai-shortlist: using cached suggestions", { shortlistKey });
+      emitProgress("ai-cache", "Using cached AI shortlist", 0.6);
+      aiShortlist = cached ? cached.suggestions.map((s) => ({ ...s })) : [];
+    } else {
+      aiShortlistCache.delete(shortlistKey);
+    }
+  } else {
+    emitProgress("ai-request", "Asking AI for top sights", 0.55);
+    aiShortlist = await fetchAISuggestions({
+      cityName: opts?.cityName,
+      countryName: opts?.countryName,
+      lat,
+      lng,
+      tripWindow: opts?.tripWindow,
+      minResults: 30,
+      maxResults: 42,
+    });
+
+    if (allowCache && aiShortlist.length) {
+      aiShortlistCache.set(shortlistKey, {
+        suggestions: aiShortlist.map((s) => ({ ...s })),
+        ts: Date.now(),
+      });
+    }
+    emitProgress("ai-response", "Processing AI shortlist", 0.62);
+  }
+
+  if (aiShortlist.length === 0) {
+    console.warn("ai-shortlist: no suggestions returned");
+    emitProgress("ai-empty", "No AI suggestions - using fallback", 0.62);
+  } else {
+    if (aiShortlist.length < 30) {
+      console.warn("ai-shortlist: fewer AI places than target", aiShortlist.length);
+    }
+    console.log(
+      "ai-shortlist: received suggestions",
+      aiShortlist.map((s) => ({
+        name: s.name,
+        category: s.category,
+        availability: s.availability,
+        priority: s.priority,
+        confidence: s.confidence,
+      }))
+    );
+    emitProgress("ai-process", `Matching ${aiShortlist.length} AI suggestions`, 0.7);
+  }
+
+  if (aiShortlist.length) {
+    const existingById = new Map<string, any>();
+    baseItems.forEach((item) => {
+      if (item?.place_id) existingById.set(item.place_id, item);
+    });
+
+    const seenSuggestionNames = new Set<string>();
+    const totalSuggestions = aiShortlist.length || 1;
+    let processedSuggestions = 0;
+
+    for (const suggestion of aiShortlist) {
+      console.log("ai-shortlist: processing suggestion", suggestion);
+
+      const normalizedSuggestionName = normalizeName(suggestion.name);
+      if (normalizedSuggestionName && seenSuggestionNames.has(normalizedSuggestionName)) {
+        console.log("ai-shortlist: skip duplicate suggestion name", suggestion.name);
+        continue;
+      }
+
+      if (
+        suggestion.confidence !== undefined &&
+        suggestion.confidence < AI_CONFIDENCE_THRESHOLD
+      ) {
+        console.warn("ai-shortlist: rejected for low confidence", {
+          name: suggestion.name,
+          confidence: suggestion.confidence,
+        });
+        continue;
+      }
+
+      if (normalizedSuggestionName) seenSuggestionNames.add(normalizedSuggestionName);
+
+      if (AI_BANNED_NAME_RE.test(suggestion.name)) {
+        console.warn("ai-shortlist: rejected by banned-name pattern", suggestion.name);
+        continue;
+      }
+      if (suggestion.availability === "seasonal_future") {
+        console.warn("ai-shortlist: rejected seasonal_future entry", suggestion.name);
+        continue;
+      }
+
+      console.log("ai-shortlist: resolving via text search", suggestion.search_name);
+      const textResult = await fetchPlaceByText(suggestion.search_name, lat, lng);
+      if (!textResult) {
+        console.warn("ai-shortlist: unresolved by Google Text Search", suggestion.name);
+        continue;
+      }
+
+      const key = getPlaceKey(textResult);
+      if (!key) {
+        console.warn("ai-shortlist: missing key after lookup", suggestion.name);
+        continue;
+      }
+
+      let distanceKm: number | undefined;
+      const placeLat = textResult?.geometry?.location?.lat;
+      const placeLng = textResult?.geometry?.location?.lng;
+      if (typeof placeLat === "number" && typeof placeLng === "number") {
+        distanceKm = haversineKm(lat, lng, placeLat, placeLng);
+        if (Number.isFinite(distanceKm) && distanceKm > AI_MAX_DISTANCE_KM) {
+          console.warn("ai-shortlist: rejected for distance", {
+            name: textResult.name,
+            distanceKm: distanceKm.toFixed(1),
+          });
+          continue;
+        }
+      }
+
+      const placeTypes = (textResult.types ?? []).map((t: string) => t?.toLowerCase?.() ?? t) as string[];
+      if (shouldRejectByTypes(placeTypes)) {
+        console.warn("ai-shortlist: rejected by google type", {
+          name: textResult.name,
+          types: placeTypes,
+        });
+        continue;
+      }
+
+      if (isRemoteIslandSuggestion(suggestion, textResult, lat, lng)) {
+        console.warn("ai-shortlist: rejected remote island", {
+          name: textResult.name,
+          category: suggestion.category,
+        });
+        continue;
+      }
+
+      shortlistMeta.set(key, { ...suggestion, distanceKm });
+      if (textResult.place_id && existingById.has(textResult.place_id)) {
+        console.log("ai-shortlist: mapped to existing place", textResult.name, {
+          priority: suggestion.priority,
+        });
+        processedSuggestions += 1;
+        if (processedSuggestions === totalSuggestions || processedSuggestions % 5 === 0) {
+          const progressValue = 0.7 + Math.min(0.15, (processedSuggestions / totalSuggestions) * 0.15);
+          emitProgress(
+            "ai-map",
+            `Matching AI picks (${processedSuggestions}/${totalSuggestions})`,
+            progressValue
+          );
+        }
+        continue;
+      }
+
+      baseItems.push(textResult);
+      if (textResult.place_id) existingById.set(textResult.place_id, textResult);
+      console.log("ai-shortlist: added new place from text search", textResult.name, {
+        priority: suggestion.priority,
+      });
+      processedSuggestions += 1;
+      if (processedSuggestions === totalSuggestions || processedSuggestions % 5 === 0) {
+        const progressValue = 0.7 + Math.min(0.15, (processedSuggestions / totalSuggestions) * 0.15);
+        emitProgress(
+          "ai-map",
+          `Matching AI picks (${processedSuggestions}/${totalSuggestions})`,
+          progressValue
+        );
+      }
+    }
+
+    if (shortlistMeta.size) {
+      shortlistOrder = new Map(
+        [...shortlistMeta.entries()]
+          .sort((a, b) => a[1].priority - b[1].priority)
+          .map(([key, info]) => [key, info.priority])
+      );
+      console.log("ai-shortlist: shortlist order", [...shortlistOrder.entries()]);
+    }
+  }
+
+  emitProgress("details-start", "Fetching detailed info", 0.82);
 
   // 3) Details (use cache, then fill)
   const TOP_FOR_DETAILS = Math.min(60, baseItems.length);
@@ -543,6 +995,8 @@ export const fetchPlacesByCoordinates = async (
       toFetch.push(base);
     }
   }
+
+  emitProgress("details-fetch", `Fetching details for ${toFetch.length} places`, 0.88);
 
   const pool = 3;
   for (let i = 0; i < toFetch.length; i += pool) {
@@ -666,20 +1120,86 @@ export const fetchPlacesByCoordinates = async (
     };
   });
 
+  let finalList = enriched.slice();
+
+  if (shortlistOrder && shortlistOrder.size) {
+    const selected: any[] = [];
+    const remainder: any[] = [];
+
+    for (const place of finalList) {
+      const key = getPlaceKey(place);
+      if (key && shortlistMeta.has(key)) {
+        const meta = shortlistMeta.get(key)!;
+        console.log("ai-shortlist: decorating final place", meta.name ?? place.name, {
+          priority: meta.priority,
+          availability: meta.availability,
+          contextTag: resolveContextTag(meta.category ?? undefined),
+          distanceKm: meta.distanceKm,
+        });
+        (place as any).aiCuration = {
+          keep: true,
+          priority: meta.priority,
+          source: "ai-shortlist",
+          reason: truncate(meta.note) ?? resolveDefaultNote(meta.category ?? undefined),
+          confidence: meta.confidence,
+          availability: meta.availability === "seasonal_active" ? "seasonal_active" : "year_round",
+          contextTag: resolveContextTag(meta.category ?? undefined),
+          distanceKm: meta.distanceKm,
+        } as AICurationMeta;
+        selected.push(place);
+      } else {
+        remainder.push(place);
+      }
+    }
+
+    selected.sort((a, b) => {
+      const keyA = getPlaceKey(a);
+      const keyB = getPlaceKey(b);
+      const priA = keyA ? shortlistOrder!.get(keyA) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+      const priB = keyB ? shortlistOrder!.get(keyB) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+      if (priA !== priB) return priA - priB;
+      return (b.score ?? 0) - (a.score ?? 0);
+    });
+
+    remainder.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    finalList = [...selected, ...remainder];
+  } else {
+    finalList.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  }
+
+  finalList = finalList
+    .filter((p) => {
+      const key = getPlaceKey(p);
+      if (!shortlistOrder || !shortlistOrder.size) return true;
+      return key ? shortlistOrder.has(key) : false;
+    })
+    .filter((p) => !AI_BANNED_NAME_RE.test(p.name ?? ""));
+
+  const shortlistLimit = shortlistOrder?.size ? Math.min(shortlistOrder.size, finalList.length) : finalList.length;
+  finalList = finalList.slice(0, shortlistLimit);
+
+  console.log("ai-shortlist: final list ready", finalList.map((p) => ({
+    name: p.name,
+    aiPriority: (p as any).aiCuration?.priority ?? null,
+    source: (p as any).aiCuration?.source ?? "score",
+  })));
+
+  emitProgress("complete", "Shortlist ready", 1);
+
   if (DEBUG_LISTGEN) {
     console.group("listgen:photos");
-    const withPhoto = enriched.filter((p) => !!p.photoUrl).length;
-    console.log({ withPhoto, withoutPhoto: enriched.length - withPhoto });
-    enriched.slice(0, 3).forEach((p, i) =>
+    const withPhoto = finalList.filter((p) => !!p.photoUrl).length;
+    console.log({ withPhoto, withoutPhoto: finalList.length - withPhoto });
+    finalList.slice(0, 3).forEach((p, i) =>
       console.log(`#${i + 1}`, p.name, p.photoUrl, p.photoAttribution?.text)
     );
     console.groupEnd();
 
-    const cnt = enriched.length;
-    const openNowCnt = enriched.filter((p) => p.openNow === true).length;
-    const closingSoonCnt = enriched.filter((p) => p.closingSoon === true).length;
-    const hoursMissing = enriched.filter((p) => p.todaysHoursText == null).length;
-    const busyDist = enriched.reduce((acc: any, p: any) => {
+    const cnt = finalList.length;
+    const openNowCnt = finalList.filter((p) => p.openNow === true).length;
+    const closingSoonCnt = finalList.filter((p) => p.closingSoon === true).length;
+    const hoursMissing = finalList.filter((p) => p.todaysHoursText == null).length;
+    const busyDist = finalList.reduce((acc: any, p: any) => {
       const k = p.busyLevel ?? "unknown";
       acc[k] = (acc[k] ?? 0) + 1;
       return acc;
@@ -689,9 +1209,9 @@ export const fetchPlacesByCoordinates = async (
     console.table(busyDist);
     console.groupEnd();
 
-    console.group("listgen:preview (pre-sort)");
+    console.group("listgen:preview");
     console.table(
-      enriched.slice(0, 10).map((p) => ({
+      finalList.slice(0, 10).map((p) => ({
         name: p.name,
         catNorm: p.normalizedCategory,
         inOut: p.category,
@@ -702,33 +1222,15 @@ export const fetchPlacesByCoordinates = async (
         busy: p.busyLevel,
         dur: p.preferredDuration,
         score: p.score?.toFixed?.(2),
+        aiPriority: (p as any).aiCuration?.priority ?? null,
+        aiSource: (p as any).aiCuration?.source ?? null,
       }))
     );
-    console.groupEnd();
-  }
-
-  const sorted = enriched.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-  if (DEBUG_LISTGEN) {
-    const top = sorted.slice(0, 12).map((p) => ({
-      name: p.name,
-      catNorm: p.normalizedCategory,
-      inOut: p.category,
-      rating: p.rating,
-      reviews: p.user_ratings_total,
-      openNow: p.openNow,
-      hours: p.todaysHoursText,
-      busy: p.busyLevel,
-      dur: p.preferredDuration,
-      score: p.score?.toFixed?.(2),
-    }));
-    console.group("listgen:final top12");
-    console.table(top);
     console.groupEnd();
     console.timeEnd(tag("total"));
   }
 
-  return sorted.slice(0, 50);
+  return finalList;
 };
 
 // ====== Compact list for the LLM step (unchanged) ======
@@ -744,3 +1246,17 @@ export const makeCompactPlacesList = (places: any[]) => {
     lng: p.lng,
   }));
 };
+
+type AICurationMeta = {
+  keep: boolean;
+  reason?: string;
+  confidence?: number;
+  highlightTags?: string[];
+  priority?: number;
+  source?: string;
+  availability?: "year_round" | "seasonal_active";
+  contextTag?: string;
+  distanceKm?: number;
+};
+
+

@@ -1,13 +1,15 @@
 // screens/Index.tsx
 import CalendarRangePicker, { DateISO } from "@/lib/components/calendar";
-import { fetchPlacesByCoordinates } from "@/lib/google";
+import { fetchPlacesByCoordinates, FetchProgressUpdate } from "@/lib/google";
 import { inferPreferencesFromSelections } from "@/lib/preferences";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    Alert, Image, Pressable,
+    Alert,
+    Image,
+    Pressable,
     ScrollView,
     StyleSheet,
     Text,
@@ -16,16 +18,46 @@ import {
     View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
 const PERF = true;
 const t = (label: string) => PERF && console.time(label);
 const tend = (label: string) => PERF && console.timeEnd(label);
 
+const TIME_24H_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const START_TIME_OPTIONS = ["08:00", "09:00", "10:00", "11:00"];
+
 export default function Index() {
+  const router = useRouter();
   const [city, setCity] = useState("");
   const [places, setPlaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  const [itineraryStart, setItineraryStart] = useState<string>("09:00");
+
+  const [loadingProgress, setLoadingProgress] = useState<{ value: number; label: string }>({
+    value: 0,
+    label: "",
+  });
+
+  const [savedSelectionSummary, setSavedSelectionSummary] = useState<Array<{ place_id: string; name: string }>>([]);
+  const [savingPreferences, setSavingPreferences] = useState(false);
+
+  const activeRequestRef = useRef<string | null>(null);
+  const lastCompletedRequestRef = useRef<string | null>(null);
+
+  const buildRequestSignature = (
+    lat: number,
+    lng: number,
+    cityHint?: string,
+    tripStart?: DateISO,
+    tripEnd?: DateISO
+  ) => {
+    const latKey = lat?.toFixed?.(4) ?? String(lat);
+    const lngKey = lng?.toFixed?.(4) ?? String(lng);
+    return [latKey, lngKey, cityHint ?? "", tripStart ?? "", tripEnd ?? ""].join("|");
+  };
 
   // Onboarding - now integrated into main UI
   const [onboardStep, setOnboardStep] = useState<1 | 2 | 3 | 4 | 5>(1);
@@ -62,7 +94,7 @@ export default function Index() {
       }))
       .sort((a, b) => b._prefScore - a._prefScore);
 
-    console.log(`🎯 Building candidates from ${source.length} places (maxPerCat: ${maxPerCat}, cap: ${cap})`);
+    console.log(`Building candidates from ${source.length} places (maxPerCat: ${maxPerCat}, cap: ${cap})`);
 
     const byCat: Record<string, any[]> = {};
     scored.forEach((p) => {
@@ -82,8 +114,8 @@ export default function Index() {
       picked.push(...remaining.slice(0, cap - picked.length));
     }
 
-    console.log(`🎯 Built ${picked.length} candidates from ${Object.keys(byCat).length} categories`);
-    console.log(`📊 Categories: ${Object.entries(byCat).map(([cat, list]) => `${cat}(${list.length})`).join(', ')}`);
+    console.log(`Built ${picked.length} candidates from ${Object.keys(byCat).length} categories`);
+    console.log(`Categories: ${Object.entries(byCat).map(([cat, list]) => `${cat}(${list.length})`).join(', ')}`);
     
     return picked.slice(0, cap);
   };
@@ -96,19 +128,83 @@ export default function Index() {
     });
   }
 
+  const isValidStartTime = (value: string) => TIME_24H_RE.test(value.trim());
+
+  const handleStartTimeChange = (value: string) => {
+    const cleaned = value.replace(/[^0-9:]/g, "");
+    setItineraryStart(cleaned.slice(0, 5));
+  };
+
+  const normalizedLoadingProgress = (() => {
+    const value = loadingProgress?.value ?? 0;
+    if (Number.isNaN(value)) return 0;
+    return Math.min(1, Math.max(0, value));
+  })();
+
+  const estimatedMinutesRemaining = loading
+    ? Math.max(1, Math.ceil((1 - normalizedLoadingProgress) * 5))
+    : null;
+
+  useEffect(() => {
+    if (onboardStep !== 4) return;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem("userPreferences");
+        if (!raw) {
+          setSavedSelectionSummary([]);
+          setSelectedIds(new Set());
+          return;
+        }
+
+        const parsed = JSON.parse(raw);
+        const mustSeeIds: string[] = Array.isArray(parsed?.mustSee)
+          ? parsed.mustSee.filter((id: any) => typeof id === "string")
+          : [];
+        const storedPlaces: Array<{ place_id: string; name: string }> = Array.isArray(parsed?.selectedPlaces)
+          ? parsed.selectedPlaces.filter(
+              (entry: any) => entry && typeof entry.place_id === "string" && typeof entry.name === "string"
+            )
+          : mustSeeIds.map((id) => ({ place_id: id, name: id }));
+
+        setSavedSelectionSummary(storedPlaces);
+        setSelectedIds(new Set(mustSeeIds));
+      } catch (error) {
+        console.warn("Failed to load saved preferences", error);
+      }
+    })();
+  }, [onboardStep]);
+
+  const selectedSummaryList = useMemo(() => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) {
+      return savedSelectionSummary;
+    }
+
+    const mergedPool = [...candidates, ...places];
+    const lookup = new Map<string, any>(mergedPool.map((p: any) => [p.place_id, p]));
+    return ids.map((id) => {
+      const place = lookup.get(id);
+      const fallback = savedSelectionSummary.find((item) => item.place_id === id);
+      return {
+        place_id: id,
+        name: place?.name ?? fallback?.name ?? "Selected place",
+      };
+    });
+  }, [selectedIds, candidates, places, savedSelectionSummary]);
+
   function computePrefsFromSelection() {
     // Get selected places from candidates
     const selectedPlaces = Array.from(selectedIds)
       .map(id => candidates.find(c => c.place_id === id))
       .filter(Boolean);
 
-    console.log(`🧠 Analyzing ${selectedPlaces.length} selected places for smart preference inference...`);
+    console.log(`Analyzing ${selectedPlaces.length} selected places for smart preference inference...`);
 
     // Use smart inference instead of manual weight calculation
     const preferences = inferPreferencesFromSelections(selectedPlaces);
     const mustSee = Array.from(selectedIds);
 
-    console.log("✅ Smart preferences computed:", {
+    console.log("Smart preferences computed:", {
       totalSelections: selectedPlaces.length,
       categories: Object.keys(preferences).length,
       mustSeeCount: mustSee.length
@@ -117,8 +213,38 @@ export default function Index() {
     return { preferences, mustSee };
   }
 
+  const handleResetPreferences = () => {
+    Alert.alert(
+      "Reset preferences?",
+      "This will clear your saved selections and itinerary plan.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await AsyncStorage.removeItem("userPreferences");
+              await AsyncStorage.removeItem("savedTripPlan");
+              await AsyncStorage.removeItem("pendingAutoGenerateTripPlan");
+              setSelectedIds(new Set());
+              setSavedSelectionSummary([]);
+              Alert.alert("Preferences reset", "Selections cleared. You can choose new places now.");
+            } catch (error) {
+              console.error("Failed to reset preferences:", error);
+              Alert.alert("Error", "Couldn't reset preferences. Please try again.");
+            }
+          },
+        },
+      ]
+    );
+  };
+
   async function saveSelectionAndClose() {
+    if (savingPreferences) return;
     try {
+      setSavingPreferences(true);
+
       // 1) Build userPreferences from the grid
       const { preferences, mustSee } = computePrefsFromSelection();
       
@@ -126,9 +252,28 @@ export default function Index() {
       if (!startDate || !endDate) {
         Alert.alert("Trip dates needed", "Please select a start and end date.");
         setOnboardStep(2);
+        setSavingPreferences(false);
         return;
       }
-  
+
+      if (!isValidStartTime(itineraryStart)) {
+        Alert.alert("Daily start time needed", "Please enter your preferred start time in HH:MM format.");
+        setOnboardStep(2);
+        setSavingPreferences(false);
+        return;
+      }
+
+      const pool = [...candidates, ...places];
+      const lookup = new Map<string, any>(pool.map((p: any) => [p.place_id, p]));
+      const selectedSummaries = Array.from(new Set(mustSee)).map((id) => {
+        const place = lookup.get(id);
+        const fallback = savedSelectionSummary.find((item) => item.place_id === id);
+        return {
+          place_id: id,
+          name: place?.name ?? fallback?.name ?? "Selected place",
+        };
+      });
+
       // 3) Trip context (used by multi-day planner)
       const tripContext = {
         startDate,
@@ -137,25 +282,34 @@ export default function Index() {
         days: Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 1,
         gender,
         accommodationAddress: city || "",
+        itineraryStartTime: itineraryStart,
       };
 
       // 4) Save everything to AsyncStorage
-      await AsyncStorage.setItem("userPreferences", JSON.stringify({ preferences, mustSee }));
+      await AsyncStorage.setItem(
+        "userPreferences",
+        JSON.stringify({ preferences, mustSee, selectedPlaces: selectedSummaries })
+      );
       await AsyncStorage.setItem("tripContext", JSON.stringify(tripContext));
       await AsyncStorage.setItem("userBiometrics", JSON.stringify({ age, height, weight, gender }));
+      await AsyncStorage.setItem("pendingAutoGenerateTripPlan", "1");
 
-      console.log("✅ Onboarding completed and saved:", {
+      console.log("Onboarding completed and saved:", {
         preferences: Object.keys(preferences).length,
         mustSee: mustSee.length,
         tripDays: tripContext.days,
         biometrics: { age, height, weight, gender }
       });
 
-      Alert.alert("Success!", "Your preferences have been saved. Head to the Explore tab to start planning your trip!");
-      setOnboardStep(5); // Completion state
+      setSavedSelectionSummary(selectedSummaries);
+
+      Alert.alert("Preferences saved", "Sit tight, we're building your multi-day itinerary now!");
+      router.replace("/(root)/(tabs)/explore");
     } catch (error) {
-      console.error("❌ Failed to save preferences:", error);
+      console.error("Failed to save preferences:", error);
       Alert.alert("Error", "Failed to save preferences. Please try again.");
+    } finally {
+      setSavingPreferences(false);
     }
   }
 
@@ -190,38 +344,85 @@ export default function Index() {
       }
 
       // Auto-load places when location is detected
-      await loadPlaces(latitude, longitude);
+      await loadPlaces(latitude, longitude, address.city ?? address.region ?? undefined, startDate, endDate);
     } catch (error) {
-      console.error("❌ Location detection failed:", error);
+      console.error("Location detection failed:", error);
       Alert.alert("Error", "Failed to detect location. Please try again.");
     } finally {
       setDetecting(false);
     }
   }
 
-  async function loadPlaces(targetLat?: number, targetLng?: number) {
+  async function loadPlaces(
+    targetLat?: number,
+    targetLng?: number,
+    cityHint?: string,
+    tripStart?: DateISO,
+    tripEnd?: DateISO,
+    options?: { force?: boolean; bypassSeedCache?: boolean }
+  ) {
     if (!targetLat || !targetLng) {
       Alert.alert("Error", "No coordinates available. Please detect location first.");
       return;
     }
 
+    const normalizedCity = cityHint || city || "";
+    const normalizedStart = tripStart || startDate || "";
+    const normalizedEnd = tripEnd || endDate || "";
+    const requestSignature = buildRequestSignature(
+      targetLat,
+      targetLng,
+      normalizedCity,
+      normalizedStart,
+      normalizedEnd
+    );
+
+    if (activeRequestRef.current === requestSignature) {
+      console.log("ai-shortlist: skipping duplicate in-flight request", requestSignature);
+      return;
+    }
+
+    if (!options?.force && lastCompletedRequestRef.current === requestSignature) {
+      console.log("ai-shortlist: skipping duplicate request", requestSignature);
+      return;
+    }
+
+    activeRequestRef.current = requestSignature;
+
     setLoading(true);
-    console.log(`🔍 Fetching POIs near: ${targetLat}, ${targetLng}`);
+    setLoadingProgress({ value: 0.05, label: "Preparing nearby places..." });
+    console.log(`Fetching POIs near: ${targetLat}, ${targetLng}`);
 
     try {
       t("fetchPlacesByCoordinates");
-      const results = await fetchPlacesByCoordinates(targetLat, targetLng);
+      const results = await fetchPlacesByCoordinates(targetLat, targetLng, {
+        bypassSeedCache: options?.bypassSeedCache,
+        cityName: cityHint || city || undefined,
+        tripWindow: {
+          start: tripStart || startDate || undefined,
+          end: tripEnd || endDate || undefined,
+        },
+        onProgress: (update: FetchProgressUpdate) => {
+          setLoadingProgress((prev) => ({
+            value:
+              update.progress !== undefined
+                ? Math.max(0, Math.min(1, update.progress))
+                : prev.value,
+            label: update.message ?? prev.label,
+          }));
+        },
+      });
       tend("fetchPlacesByCoordinates");
 
-      console.log(`📍 Found ${results.length} places`);
-      console.log(`🔑 API Key status: ${process.env.EXPO_PUBLIC_GOOGLE_API_KEY ? 'Present' : 'Missing'}`);
+      console.log(`Found ${results.length} places`);
+      console.log(`API Key status: ${process.env.EXPO_PUBLIC_GOOGLE_API_KEY ? 'Present' : 'Missing'}`);
       
       // Debug: Check how many places have photos
       const withPhotos = results.filter(p => p.photoUrl);
-      console.log(`📸 Places with photos: ${withPhotos.length}/${results.length}`);
+      console.log(`Places with photos: ${withPhotos.length}/${results.length}`);
       
       // Detailed photo debugging
-      console.log(`🔍 Photo debugging for first 5 places:`);
+      console.log(`Photo debugging for first 5 places:`);
       results.slice(0, 5).forEach((p, i) => {
         console.log(`${i + 1}. ${p.name}:`, {
           hasPhotos: !!p.photos,
@@ -234,51 +435,60 @@ export default function Index() {
       });
       
       if (withPhotos.length > 0) {
-        console.log(`📸 Sample photo URLs:`, withPhotos.slice(0, 3).map(p => ({ name: p.name, photoUrl: p.photoUrl })));
+        console.log(`Sample photo URLs:`, withPhotos.slice(0, 3).map(p => ({ name: p.name, photoUrl: p.photoUrl })));
       } else {
-        console.log(`❌ No places have photos! This might be a Google Places API issue.`);
-        console.log(`🔧 Possible causes:`);
+        console.log(`No places have photos. This might be a Google Places API issue.`);
+        console.log(`Possible causes:`);
         console.log(`   - Google Places API key doesn't have photo permissions`);
         console.log(`   - Places don't have photos in the database`);
         console.log(`   - Photo URLs are being blocked by CORS or network issues`);
       }
       
       setPlaces(results);
+      setLoadingProgress({ value: 1, label: "Recommendations ready!" });
 
       // Build candidates for selection
       const candidates = buildPreferenceCandidates(results);
       setCandidates(candidates);
-      console.log(`🎯 Built ${candidates.length} preference candidates`);
+      console.log(`Built ${candidates.length} preference candidates`);
       
       // Debug: Check candidates with photos
       const candidatesWithPhotos = candidates.filter(p => p.photoUrl);
-      console.log(`📸 Candidates with photos: ${candidatesWithPhotos.length}/${candidates.length}`);
+      console.log(`Candidates with photos: ${candidatesWithPhotos.length}/${candidates.length}`);
       
       // Test photo URL accessibility
       if (candidatesWithPhotos.length > 0) {
         const testPhoto = candidatesWithPhotos[0];
-        console.log(`🧪 Testing photo URL accessibility for: ${testPhoto.name}`);
-        console.log(`🧪 Photo URL: ${testPhoto.photoUrl}`);
+        console.log(`Testing photo URL accessibility for: ${testPhoto.name}`);
+        console.log(`Photo URL: ${testPhoto.photoUrl}`);
         
         // Test if the photo URL is accessible
         fetch(testPhoto.photoUrl)
           .then(response => {
-            console.log(`🧪 Photo fetch result: ${response.status} ${response.statusText}`);
+            console.log(`Photo fetch result: ${response.status} ${response.statusText}`);
             if (response.ok) {
-              console.log(`✅ Photo URL is accessible!`);
+              console.log(`Photo URL is accessible.`);
             } else {
-              console.log(`❌ Photo URL returned error: ${response.status}`);
+              console.log(`Photo URL returned error: ${response.status}`);
             }
           })
           .catch(error => {
-            console.log(`❌ Photo fetch failed:`, error.message);
+            console.log(`Photo fetch failed:`, error.message);
           });
       }
+      lastCompletedRequestRef.current = requestSignature;
+      return results;
     } catch (error) {
-      console.error("❌ Failed to load places:", error);
+      console.error("Failed to load places:", error);
       Alert.alert("Error", "Failed to load places. Please try again.");
     } finally {
       setLoading(false);
+      if (activeRequestRef.current === requestSignature) {
+        activeRequestRef.current = null;
+      }
+      setTimeout(() => {
+        setLoadingProgress({ value: 0, label: "" });
+      }, 500);
     }
   }
 
@@ -287,21 +497,21 @@ export default function Index() {
       Alert.alert("Error", "No coordinates available. Please detect location first.");
       return;
     }
-    setLoading(true);
-    console.log("🔄 Pull Fresh from Google…");
-    const results = await fetchPlacesByCoordinates(coords.lat, coords.lng, {
-      bypassSeedCache: true,
-    });
-    setPlaces(results);
-    const candidates = buildPreferenceCandidates(results);
-    setCandidates(candidates);
-    setLoading(false);
+    console.log("Pulling fresh data from Google.");
+    await loadPlaces(
+      coords.lat,
+      coords.lng,
+      city,
+      startDate,
+      endDate,
+      { force: true, bypassSeedCache: true }
+    );
   }
 
   // Auto-load places when location is detected and we're on step 4
   useEffect(() => {
     if (coords && onboardStep === 4 && candidates.length === 0) {
-      loadPlaces(coords.lat, coords.lng);
+      loadPlaces(coords.lat, coords.lng, city, startDate, endDate);
     }
   }, [coords, onboardStep]);
 
@@ -481,6 +691,52 @@ export default function Index() {
               }}
             />
 
+            <View className="mt-8">
+              <Text className="font-rubik-semibold text-gray-700 text-lg mb-2">
+                What time should your days start?
+              </Text>
+              <Text className="text-gray-500 text-sm mb-4">
+                We'll build each day's plan around this start time.
+              </Text>
+
+              <View className="flex-row flex-wrap gap-3 mb-4">
+                {START_TIME_OPTIONS.map((option) => {
+                  const selected = itineraryStart === option;
+                  return (
+                    <TouchableOpacity
+                      key={option}
+                      onPress={() => setItineraryStart(option)}
+                      className={`px-4 py-3 rounded-xl border-2 ${
+                        selected ? "border-primary-100 bg-primary-50" : "border-gray-300 bg-white"
+                      }`}
+                    >
+                      <Text className={`font-rubik-semibold ${selected ? "text-primary-100" : "text-gray-700"}`}>
+                        {option}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <Text className="font-rubik-semibold text-gray-700 mb-2">Or enter your own time (24h)</Text>
+              <TextInput
+                placeholder="09:00"
+                value={itineraryStart}
+                onChangeText={handleStartTimeChange}
+                keyboardType="numbers-and-punctuation"
+                autoCapitalize="none"
+                autoCorrect={false}
+                className={`border rounded-xl px-4 py-4 text-lg ${
+                  isValidStartTime(itineraryStart) ? "border-gray-300" : "border-red-400"
+                }`}
+              />
+              {!isValidStartTime(itineraryStart) && (
+                <Text className="text-red-500 text-xs mt-2">
+                  Use HH:MM in 24-hour format (e.g., 09:30).
+                </Text>
+              )}
+            </View>
+
             <View className="flex-row gap-4 mt-8">
               <TouchableOpacity
                 onPress={() => setOnboardStep(1)}
@@ -492,6 +748,10 @@ export default function Index() {
                 onPress={() => {
                   if (!startDate || !endDate) {
                     Alert.alert("Missing dates", "Please select both start and end dates.");
+                    return;
+                  }
+                  if (!isValidStartTime(itineraryStart)) {
+                    Alert.alert("Invalid start time", "Please enter a valid HH:MM (24h) start time.");
                     return;
                   }
                   setOnboardStep(3);
@@ -521,7 +781,12 @@ export default function Index() {
 
             {detecting ? (
               <View className="items-center py-8">
-                <ActivityIndicator size="large" color="#0061ff" />
+                <View className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <View
+                      className="h-3 bg-primary-100 rounded-full"
+                      style={{ width: `${Math.max(8, Math.round((loadingProgress.value || 0) * 100))}%` }}
+                    />
+                  </View>
                 <Text className="text-gray-600 mt-4">Detecting your location...</Text>
               </View>
             ) : null}
@@ -552,7 +817,7 @@ export default function Index() {
                 onChangeText={setCity}
                 className="border border-gray-300 rounded-xl px-4 py-4 text-lg"
               />
-              <Text className="text-xs text-gray-500 mt-2">We’ll use this as your home base.</Text>
+              <Text className="text-xs text-gray-500 mt-2">We'll use this as your home base.</Text>
             </View>
 
             <View className="flex-row gap-4">
@@ -606,16 +871,47 @@ export default function Index() {
               </View>
               <Text className="text-gray-600 text-sm mt-2">
                 {selectedIds.size >= 3 
-                  ? "✅ Ready to create your trip!" 
+                  ? "Ready to create your trip!" 
                   : `Select ${3 - selectedIds.size} more place${3 - selectedIds.size === 1 ? '' : 's'}`
                 }
               </Text>
             </View>
 
+            {selectedSummaryList.length > 0 && (
+              <View className="bg-primary-50 border border-primary-100 rounded-2xl p-4 mb-6">
+                <Text className="text-primary-900 font-rubik-semibold mb-2">Your selected places</Text>
+                <View className="flex-row flex-wrap gap-2">
+                  {selectedSummaryList.map((item) => (
+                    <View key={item.place_id} className="bg-white/80 border border-primary-200 px-3 py-1.5 rounded-full">
+                      <Text className="text-primary-700 text-xs font-rubik-semibold" numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
             {loading ? (
-              <View className="items-center py-12">
+              <View className="items-center py-10 px-6 bg-gray-50 rounded-2xl border border-gray-200">
+                <Text className="text-lg font-rubik-semibold text-gray-800 mb-3">Curating your shortlist...</Text>
                 <ActivityIndicator size="large" color="#0061ff" />
-                <Text className="text-gray-600 mt-4">Finding amazing places near you...</Text>
+                <View style={{ width: "100%" }}>
+                  <View className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <View
+                      className="h-3 bg-primary-100 rounded-full"
+                      style={{ width: `${Math.max(8, Math.round((loadingProgress.value || 0) * 100))}%` }}
+                    />
+                  </View>
+                </View>
+                <Text className="text-gray-600 mt-3 text-center">
+                  {loadingProgress.label || "Finding amazing places near you..."}
+                </Text>
+                {typeof estimatedMinutesRemaining === "number" && (
+                  <Text className="text-gray-500 text-sm mt-2 text-center">
+                    Estimated time remaining: about {estimatedMinutesRemaining} minute{estimatedMinutesRemaining === 1 ? "" : "s"}
+                  </Text>
+                )}
               </View>
             ) : (
               <View className="mb-6">
@@ -649,16 +945,15 @@ export default function Index() {
                           style={{ width: '100%', height: 128 }}
                           resizeMode="cover"
                           onError={(error) => {
-                            console.log(`❌ Image failed to load for ${p.name}:`, error);
-                            console.log(`❌ Photo URL: ${p.photoUrl}`);
+                            console.log(`Image failed to load for ${p.name}:`, error);
+                            console.log(`Photo URL: ${p.photoUrl}`);
                           }}
-                          onLoad={() => console.log(`✅ Image loaded successfully for ${p.name}`)}
-                          onLoadStart={() => console.log(`🔄 Starting to load image for ${p.name}`)}
-                          onLoadEnd={() => console.log(`🏁 Finished loading image for ${p.name}`)}
+                          onLoad={() => console.log(`Image loaded successfully for ${p.name}`)}
+                          onLoadStart={() => console.log(`Starting to load image for ${p.name}`)}
+                          onLoadEnd={() => console.log(`Finished loading image for ${p.name}`)}
                         />
                       ) : (
                         <View className="w-full h-32 bg-blue-100 items-center justify-center">
-                          <Text className="text-gray-600 text-2xl mb-1">🏛️</Text>
                           <Text className="text-gray-500 text-xs font-rubik-medium">No Image</Text>
                         </View>
                       )}
@@ -669,18 +964,10 @@ export default function Index() {
                         <Text className="text-gray-600 text-xs" numberOfLines={1}>
                           {p.vicinity}
                         </Text>
-                        <View className="flex-row items-center mt-1">
-                          <Text className="text-yellow-500 text-xs">⭐</Text>
-                          <Text className="text-gray-600 text-xs ml-1">
-                            {p.rating?.toFixed(1) || "N/A"}
-                          </Text>
-                        </View>
+                        <Text className="text-gray-600 text-xs mt-1">
+                          Rating: {p.rating?.toFixed(1) || "N/A"}
+                        </Text>
                       </View>
-                      {selected && (
-                        <View className="absolute top-2 right-2 bg-primary-100 rounded-full w-6 h-6 items-center justify-center">
-                          <Text className="text-white text-xs font-rubik-bold">✓</Text>
-                        </View>
-                      )}
                     </Pressable>
                   );
                 })}
@@ -697,7 +984,7 @@ export default function Index() {
                     className="mt-4 py-3 px-4 bg-gray-100 rounded-xl border border-gray-300"
                   >
                     <Text className="text-gray-700 text-center font-rubik-medium">
-                      🔄 Load More Places ({places.length - candidates.length} more available)
+                      Load More Places ({places.length - candidates.length} more available)
                     </Text>
                   </TouchableOpacity>
                 )}
@@ -711,6 +998,15 @@ export default function Index() {
               >
                 <Text className="text-gray-700 text-center font-rubik-semibold">Back</Text>
               </TouchableOpacity>
+            </View>
+
+            <View className="flex-row gap-4 mt-4">
+              <TouchableOpacity
+                onPress={handleResetPreferences}
+                className="flex-1 border-2 border-gray-300 py-4 px-6 rounded-xl"
+              >
+                <Text className="text-center font-rubik-semibold text-gray-700">Reset Preferences</Text>
+              </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => {
                   if (selectedIds.size < 3) {
@@ -719,9 +1015,9 @@ export default function Index() {
                   }
                   saveSelectionAndClose();
                 }}
-                className={`flex-1 py-4 px-6 rounded-xl ${selectedIds.size >= 3 ? "bg-primary-100" : "bg-gray-300"}`}
-                disabled={selectedIds.size < 3}
-                style={selectedIds.size >= 3 ? {
+                className={`flex-1 py-4 px-6 rounded-xl ${(selectedIds.size >= 3 && !savingPreferences) ? "bg-primary-100" : "bg-gray-300"}`}
+                disabled={selectedIds.size < 3 || savingPreferences}
+                style={selectedIds.size >= 3 && !savingPreferences ? {
                   shadowColor: '#0061ff',
                   shadowOffset: { width: 0, height: 4 },
                   shadowOpacity: 0.3,
@@ -729,8 +1025,8 @@ export default function Index() {
                   elevation: 8,
                 } : {}}
               >
-                <Text className={`text-center font-rubik-bold text-lg ${selectedIds.size >= 3 ? 'text-white' : 'text-gray-500'}`}>
-                  {selectedIds.size >= 3 ? "🚀 Create My Trip!" : `Select ${3 - selectedIds.size} more`}
+                <Text className={`text-center font-rubik-bold text-lg ${(selectedIds.size >= 3 && !savingPreferences) ? 'text-white' : 'text-gray-500'}`}>
+                  {savingPreferences ? "Saving..." : (selectedIds.size >= 3 ? "Save and Plan Trip" : `Select ${3 - selectedIds.size} more`)}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -752,14 +1048,14 @@ export default function Index() {
                     .join(', ');
                   
                   Alert.alert(
-                    "🧠 Smart Analysis", 
+                    "Smart Analysis", 
                     `Based on your ${selectedIds.size} selections:\n\n${analysis}\n\nWe'll recommend similar places for your trip!`
                   );
                 }}
                 className="mt-4 py-3 px-4 bg-blue-50 rounded-xl border border-blue-200"
               >
                 <Text className="text-blue-700 text-center font-rubik-medium">
-                  🧠 View Smart Analysis
+                  View Smart Analysis
                 </Text>
               </TouchableOpacity>
             )}
@@ -769,7 +1065,7 @@ export default function Index() {
         {/* Completion State */}
         {onboardStep > 4 && (
           <View className="items-center py-12">
-            <Text className="text-2xl font-rubik-bold text-green-600 mb-4">🎉 All Set!</Text>
+            <Text className="text-2xl font-rubik-bold text-green-600 mb-4">All Set!</Text>
             <Text className="text-gray-600 text-center mb-6">
               Your preferences have been saved. Head to the Explore tab to start planning your trip!
             </Text>

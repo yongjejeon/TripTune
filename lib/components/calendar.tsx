@@ -57,7 +57,7 @@ export default function CalendarRangePicker({
       marked[startDate] = { startingDay: true, endingDay: true, color: "#0061ff", textColor: "white" };
       return marked;
     }
-    const days = buildDaysLocal(startDate, endDate); // ✅ local-safe
+    const days = buildDaysLocal(startDate, endDate); // local-safe
     days.forEach((d, i) => {
       if (i === 0) {
         marked[d] = { startingDay: true, color: "#0061ff", textColor: "white" };
@@ -109,8 +109,8 @@ export default function CalendarRangePicker({
       />
 
       <View className="mt-4 mb-2">
-        <Text className="font-rubik-semibold">Start: {startDate ?? "—"}</Text>
-        <Text className="font-rubik-semibold">End: {endDate ?? "—"}</Text>
+        <Text className="font-rubik-semibold">Start: {startDate ?? "-"}</Text>
+        <Text className="font-rubik-semibold">End: {endDate ?? "-"}</Text>
         <Text className="text-gray-600">Days selected: {days.length || 0}</Text>
       </View>
 

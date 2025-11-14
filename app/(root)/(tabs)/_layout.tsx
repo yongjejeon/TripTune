@@ -5,7 +5,7 @@ import React from 'react';
 import { Image, Text, View } from 'react-native';
 
 console.log(
-  "🔗 Redirect URI:",
+  "Redirect URI:",
   AuthSession.makeRedirectUri({
     native: "your.app://redirect", // optional, for standalone builds
   })

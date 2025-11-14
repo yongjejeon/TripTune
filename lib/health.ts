@@ -17,12 +17,12 @@ import {
       console.log("[HC] Already initialized");
       return;
     }
-    console.log("[HC] Initializing Health Connect…");
+    console.log("[HC] Initializing Health Connect...");
     await initialize();
-    console.log("[HC] Requesting permission: HeartRate (read) …");
+    console.log("[HC] Requesting permission: HeartRate (read) ...");
     await requestPermission([{ accessType: "read", recordType: "HeartRate" }]);
     hcReady = true;
-    console.log("[HC] Ready ✅");
+    console.log("[HC] Ready");
   }
   
   /**
@@ -30,7 +30,7 @@ import {
    */
   export async function openHCSettings() {
     try {
-      console.log("[HC] Opening Health Connect settings…");
+      console.log("[HC] Opening Health Connect settings...");
       await openHealthConnectSettings();
     } catch (e) {
       console.log("[HC] Failed to open HC settings:", e);
@@ -49,7 +49,7 @@ import {
     const start = new Date(end.getTime() - minutesBack * 60 * 1000);
   
     console.log(
-      `[HR] readLatestBpm(): window ${start.toISOString()} → ${end.toISOString()}`
+      `[HR] readLatestBpm(): window ${start.toISOString()} -> ${end.toISOString()}`
     );
   
     let latest: { bpm: number; at: string } | null = null;
@@ -69,7 +69,7 @@ import {
   
       const records = res?.records ?? [];
       console.log(
-        `[HR] readLatestBpm(): got ${records.length} records; nextPageToken=${pageToken ?? "∅"}`
+        `[HR] readLatestBpm(): got ${records.length} records; nextPageToken=${pageToken ?? "empty"}`
       );
   
       for (const rec of records) {
@@ -107,7 +107,7 @@ import {
   
   /**
    * Get ALL samples in a window (for listing/plotting).
-   * Sorted newest→oldest. Loud logging so you see batch arrivals.
+   * Sorted newest to oldest. Loud logging so you see batch arrivals.
    */
   export async function readHeartRateSeries(
     minutesBack = 60
@@ -115,7 +115,7 @@ import {
     const end = new Date();
     const start = new Date(end.getTime() - minutesBack * 60 * 1000);
     console.log(
-      `[HR] readHeartRateSeries(): window ${start.toISOString()} → ${end.toISOString()}`
+      `[HR] readHeartRateSeries(): window ${start.toISOString()} -> ${end.toISOString()}`
     );
   
     const out: { bpm: number; at: string }[] = [];
@@ -135,7 +135,7 @@ import {
       const records = res?.records ?? [];
       pageToken = res?.nextPageToken;
       console.log(
-        `[HR] readHeartRateSeries(): got ${records.length} records; nextPageToken=${pageToken ?? "∅"}`
+        `[HR] readHeartRateSeries(): got ${records.length} records; nextPageToken=${pageToken ?? "empty"}`
       );
   
       for (const rec of records) {
@@ -178,7 +178,7 @@ import {
   export async function readLatestChunk(
     minutesBack = 180
   ): Promise<{ bpm: number; at: string }[]> {
-    console.log("[HR] readLatestChunk(): scanning for newest batch…");
+    console.log("[HR] readLatestChunk(): scanning for newest batch...");
     // 1) Pull a broader window so the newest batch is included
     const end = new Date();
     const start = new Date(end.getTime() - minutesBack * 60 * 1000);
@@ -212,7 +212,7 @@ import {
     } while (pageToken);
   
     if (!newestLM) {
-      console.log("[HR] readLatestChunk(): no lastModifiedTime found → returning []");
+      console.log("[HR] readLatestChunk(): no lastModifiedTime found -> returning []");
       return [];
     }
   
@@ -223,7 +223,7 @@ import {
       .map((x) => x.rec);
   
     console.log(
-      `[HR] readLatestChunk(): newest batch LM=${newestLM} → matched records=${chosen.length}`
+      `[HR] readLatestChunk(): newest batch LM=${newestLM} -> matched records=${chosen.length}`
     );
   
     const samples: { bpm: number; at: string }[] = [];
@@ -241,9 +241,9 @@ import {
       }
     }
   
-    samples.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()); // oldest→newest within batch
+    samples.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()); // oldest to newest within batch
     console.log(
-      `[HR] readLatestChunk(): samples in newest batch=${samples.length} (range ${samples[0]?.at ?? "∅"} → ${samples.at(-1)?.at ?? "∅"})`
+      `[HR] readLatestChunk(): samples in newest batch=${samples.length} (range ${samples[0]?.at ?? "empty"} -> ${samples.at(-1)?.at ?? "empty"})`
     );
     return samples;
   }

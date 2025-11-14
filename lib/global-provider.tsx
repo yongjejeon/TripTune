@@ -26,7 +26,7 @@ export const GlobalProvider = ({ children }: { children: ReactNode }) => {
     data: user,
     loading,
     refetch
-  } = useAppwrite({ fn: getCurrentUser }); // ✅ Corrected hook usage
+  } = useAppwrite({ fn: getCurrentUser }); // Corrected hook usage
 
   const isLoggedIn = !!user;
 

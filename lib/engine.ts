@@ -47,10 +47,10 @@ export function estimateREEkcalDay(profile: UserProfile): number {
 }
 
 /**
- * HR → Energy (Keytel). Returns kcal for the window.
- * Male:  EE (J/min) = −55.0969 + 0.6309 × HR + 0.1988 × weight(kg) + 0.2017 × age
- * Female:EE (J/min) = −20.4022 + 0.4472 × HR − 0.1263 × weight(kg) + 0.074  × age
- * Convert J/min → kcal/min (÷ 4184).
+ * HR -> Energy (Keytel). Returns kcal for the window.
+ * Male:  EE (J/min) = -55.0969 + 0.6309 * HR + 0.1988 * weight(kg) + 0.2017 * age
+ * Female:EE (J/min) = -20.4022 + 0.4472 * HR - 0.1263 * weight(kg) + 0.074  * age
+ * Convert J/min -> kcal/min (/ 4184).
  */
 function keytelKcalPerMin(hr: number, profile: UserProfile): number {
   const { age, weightKg, sex = "unspecified" } = profile;
@@ -69,13 +69,13 @@ export function estimateEnergyKcal(
 ): { kcal: number; source: "hr" | "distance" | "met" | "unknown" } {
   const mins = Math.max(0, sensors.minutes || 0.0001);
 
-  // 1) HR present → best
+  // 1) HR present -> best
   if (sensors.hr && profile.age && profile.weightKg) {
     const kcalPerMin = keytelKcalPerMin(sensors.hr, profile);
     return { kcal: kcalPerMin * mins, source: "hr" };
   }
 
-  // 2) Distance present → walking/running cost
+  // 2) Distance present -> walking/running cost
   if ((sensors.distanceKm ?? 0) > 0) {
     const dist = sensors.distanceKm as number;
     const elev = sensors.elevationGainM ?? 0;
@@ -93,7 +93,7 @@ export function estimateEnergyKcal(
   return { kcal, source: "met" };
 }
 
-/** Apply contextual modifiers → return adjusted kcal and a modifiers map */
+/** Apply contextual modifiers -> return adjusted kcal and a modifiers map */
 export function applyModifiers(
   kcal: number,
   sensors: SensorWindow,
@@ -120,7 +120,7 @@ export function applyModifiers(
     mods.time = +0.15;
   }
 
-  // Seated transit → recovery later in update, but you can dampen cost slightly
+  // Seated transit -> recovery later in update, but you can dampen cost slightly
   if (context.transitType === "bus" || context.transitType === "car") {
     mods.seated = -0.15;
   }
@@ -210,7 +210,7 @@ export async function enhanceContextWithWeather(context: ContextWindow): Promise
             weather.condition === 'Drizzle' ? 'light' : 'none',
     };
   } catch (error) {
-    console.error('❌ Failed to enhance context with weather:', error);
+    console.error('Failed to enhance context with weather:', error);
     return context;
   }
 }

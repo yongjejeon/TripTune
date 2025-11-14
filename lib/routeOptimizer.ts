@@ -22,13 +22,13 @@ export const getTravelTime = async (
     );
 
     if (res.data.status !== "OK") {
-      console.warn(`⚠️ Directions API failed: ${res.data.status}`);
+      console.warn(`Directions API failed: ${res.data.status}`);
       return { duration: Infinity, instructions: "No route found" };
     }
 
     const leg = res.data.routes[0]?.legs[0];
     if (!leg) {
-      console.warn("⚠️ No legs found in directions response");
+      console.warn("No legs found in directions response");
       return { duration: Infinity, instructions: "No route found" };
     }
 
@@ -40,7 +40,7 @@ export const getTravelTime = async (
         const vehicle = line.vehicle.type; // BUS, SUBWAY, etc.
         const shortName = line.short_name || line.name;
 
-        return `${vehicle} ${shortName} from ${td.departure_stop.name} ➝ ${td.arrival_stop.name}`;
+        return `${vehicle} ${shortName} from ${td.departure_stop.name} -> ${td.arrival_stop.name}`;
       } else {
         // walking instructions (strip HTML tags)
         return s.html_instructions.replace(/<[^>]+>/g, "");
@@ -50,10 +50,10 @@ export const getTravelTime = async (
     return {
         duration: leg.duration.value, // seconds
         durationText: leg.duration.text, // "21 mins"
-        instructions: steps.join(" ➝ "),
+        instructions: steps.join(" -> "),
     };
   } catch (err) {
-    console.error("❌ Error fetching directions:", err);
+    console.error("Error fetching directions:", err);
     return { duration: Infinity, instructions: "API error" };
   }
 };
@@ -65,7 +65,7 @@ export const buildTravelGraph = async (
   places: any[]
 ) => {
   try {
-    console.log("🗺️ Building travel graph for", places.length, "places");
+    console.log("Building travel graph for", places.length, "places");
     
     const graph: Record<string, Record<string, { time: number; instructions: string }>> = {};
     const allNodes = [{ name: "UserStart", ...userCoords }, ...places];
@@ -75,7 +75,7 @@ export const buildTravelGraph = async (
     const limitedNodes = allNodes.slice(0, maxPlaces + 1); // +1 for UserStart
     
     if (allNodes.length > maxPlaces + 1) {
-      console.warn(`⚠️ Limiting travel graph to ${maxPlaces} places to prevent API overload`);
+      console.warn(`Limiting travel graph to ${maxPlaces} places to prevent API overload`);
     }
 
     for (let i = 0; i < limitedNodes.length; i++) {
@@ -99,7 +99,7 @@ export const buildTravelGraph = async (
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         } catch (error) {
-          console.warn(`⚠️ Failed to get travel time from ${nodeName} to ${limitedNodes[j].name}:`, error);
+          console.warn(`Failed to get travel time from ${nodeName} to ${limitedNodes[j].name}:`, error);
           const targetName = limitedNodes[j].name || `Place_${j}`;
           graph[nodeName][targetName] = {
             time: 15 * 60, // 15 minutes fallback
@@ -109,10 +109,10 @@ export const buildTravelGraph = async (
       }
     }
 
-    console.log("✅ Travel graph built successfully");
+    console.log("Travel graph built successfully");
     return { graph, nodes: limitedNodes };
   } catch (error) {
-    console.error("❌ Failed to build travel graph:", error);
+    console.error("Failed to build travel graph:", error);
     // Return a minimal fallback graph
     const fallbackGraph: Record<string, Record<string, { time: number; instructions: string }>> = {};
     const allNodes = [{ name: "UserStart", ...userCoords }, ...places.slice(0, 5)];

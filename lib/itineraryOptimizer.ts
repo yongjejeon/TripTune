@@ -16,7 +16,7 @@ const minutesToTime = (mins: number) => {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 };
 
-// ✅ Convert "1 hr 20 mins", "1.5 hr", "90 min", "2h", "2h15" → minutes
+// Convert "1 hr 20 mins", "1.5 hr", "90 min", "2h", "2h15" -> minutes
 const parseDurationToMinutes = (duration: string | number | undefined) => {
   if (duration == null) return 60;
   if (typeof duration === "number" && Number.isFinite(duration)) {
@@ -54,9 +54,10 @@ const parseDurationToMinutes = (duration: string | number | undefined) => {
 };
 
 // ---- Meal windows & defaults -----------------------------------------------
-const START_AT = "09:00"; // day start
-const LUNCH_WINDOW = { start: 12 * 60, end: 14 * 60, defaultAt: 12 * 60 + 30 };  // 12:00–14:00 → default 12:30
-const DINNER_WINDOW = { start: 18 * 60, end: 20 * 60, defaultAt: 18 * 60 + 30 }; // 18:00–20:00 → default 18:30
+const DEFAULT_START_AT = "09:00"; // day start
+const TIME_24H_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const LUNCH_WINDOW = { start: 12 * 60, end: 14 * 60, defaultAt: 12 * 60 + 30 };  // 12:00-14:00 -> default 12:30
+const DINNER_WINDOW = { start: 18 * 60, end: 20 * 60, defaultAt: 18 * 60 + 30 }; // 18:00-20:00 -> default 18:30
 
 const hasMeal = (list: any[], type: "lunch" | "dinner") =>
   list.some(
@@ -92,17 +93,25 @@ const insertMealBlock = (
   dbg(`${label.toLowerCase()}:inserted`, { start_time, end_time });
 };
 
+const resolveStartTime = (value?: string) => {
+  if (!value) return DEFAULT_START_AT;
+  const trimmed = value.trim();
+  return TIME_24H_PATTERN.test(trimmed) ? trimmed : DEFAULT_START_AT;
+};
+
 // ---- Main entry -------------------------------------------------------------
 export const reconstructItinerary = async (
   userCoords: { lat: number; lng: number },
-  rawItinerary: any[]
+  rawItinerary: any[],
+  options?: { startTime?: string }
 ) => {
+  const startAt = resolveStartTime(options?.startTime);
   try {
-    console.log("🔄 Reconstructing itinerary...");
+    console.log("Reconstructing itinerary...");
     dbg("raw input count", rawItinerary?.length);
 
     if (!rawItinerary || rawItinerary.length === 0) {
-      console.warn("⚠️ Empty itinerary provided, returning empty result");
+      console.warn("Empty itinerary provided, returning empty result");
       return [];
     }
 
@@ -117,7 +126,7 @@ export const reconstructItinerary = async (
     dbg("split", { mealsFromAI: mealsFromAI.length, attractions: attractions.length });
 
     if (attractions.length === 0) {
-      console.warn("⚠️ No attractions found, returning meals only");
+      console.warn("No attractions found, returning meals only");
       return mealsFromAI.map((item, idx) => ({
         ...item,
         order: idx + 1,
@@ -128,71 +137,65 @@ export const reconstructItinerary = async (
     const { graph } = await buildTravelGraph(userCoords, attractions);
     dbg("graph built nodes", graph?.nodes?.length ?? "n/a");
 
-    const startAt = START_AT;
     const optimizedAttractions = optimizeItinerary(userCoords, attractions, graph, startAt);
     dbg("optimized order", optimizedAttractions.map((a: any) => a.name));
 
-  // Now rebuild a timed plan from 09:00, inserting travel & meals where they fit
-  const withMeals: any[] = [];
-  let currentTime = timeToMinutes(startAt);
+    // Now rebuild a timed plan from the configured start, inserting travel & meals where they fit
+    const withMeals: any[] = [];
+    let currentTime = timeToMinutes(startAt);
 
-  for (let idx = 0; idx < optimizedAttractions.length; idx++) {
-    const item = optimizedAttractions[idx];
+    const ensureMealsInWindow = () => {
+      if (!hasMeal(withMeals, "lunch") && currentTime >= LUNCH_WINDOW.start && currentTime <= LUNCH_WINDOW.end) {
+        const lunchStart = Math.max(currentTime, LUNCH_WINDOW.start);
+        insertMealBlock(withMeals, "Lunch", lunchStart, 60, "Auto-inserted before next activity.");
+        currentTime = lunchStart + 60;
+        dbg("lunch break:inserted", { start_time: minutesToTime(lunchStart), end_time: minutesToTime(lunchStart + 60) });
+      }
 
-    // Log incoming raw values
-    dbg("step:start", {
-      item: item.name,
-      rawDuration: item.estimated_duration,
-      rawTravelTime: item.travel_time_minutes,
-      currentTime,
-    });
+      if (!hasMeal(withMeals, "dinner") && currentTime >= DINNER_WINDOW.start && currentTime <= DINNER_WINDOW.end) {
+        const dinnerStart = Math.max(currentTime, DINNER_WINDOW.start);
+        insertMealBlock(withMeals, "Dinner", dinnerStart, 60, "Auto-inserted before next activity.");
+        currentTime = dinnerStart + 60;
+        dbg("dinner break:inserted", { start_time: minutesToTime(dinnerStart), end_time: minutesToTime(dinnerStart + 60) });
+      }
+    };
 
-    // Estimate travel time (if the optimizer didn’t attach it, fall back)
-    // If your graph provides an accessor like graph.travelTime(prev, curr) you can use it here.
-    const travelTime = Number.isFinite(item.travel_time_minutes)
-      ? Math.max(0, Math.floor(item.travel_time_minutes))
-      : 10;
+    for (let idx = 0; idx < optimizedAttractions.length; idx++) {
+      const item = optimizedAttractions[idx];
 
-    const duration = parseDurationToMinutes(item.estimated_duration);
-    dbg("step:parsed", { duration, travelTime, currentTimeBefore: currentTime });
+      dbg("step:start", {
+        item: item.name,
+        rawDuration: item.estimated_duration,
+        rawTravelTime: item.travel_time_minutes,
+        currentTime,
+      });
 
-    // Schedule this attraction
-    const start_time = minutesToTime(currentTime + travelTime);
-    const end_time = minutesToTime(currentTime + travelTime + duration);
+      const travelTime = Number.isFinite(item.travel_time_minutes)
+        ? Math.max(0, Math.floor(item.travel_time_minutes))
+        : 10;
 
-    // Advance the timeline
-    currentTime += travelTime + duration;
+      currentTime += travelTime;
+      dbg("step:arrival", { item: item.name, afterTravel: currentTime, travelTime });
 
-    dbg("step:scheduled", { item: item.name, start_time, end_time, currentTime });
+      ensureMealsInWindow();
 
-    withMeals.push({
-      ...item,
-      estimated_duration: duration,
-      start_time,
-      end_time,
-      travel_time_minutes: travelTime,
-    });
+      const duration = parseDurationToMinutes(item.estimated_duration);
+      const start_time = minutesToTime(currentTime);
+      currentTime += duration;
+      const end_time = minutesToTime(currentTime);
 
-    // ---- Smart meal insertion during itinerary building ---------------------
-    const alreadyHasLunch = hasMeal(withMeals, "lunch");
-    const alreadyHasDinner = hasMeal(withMeals, "dinner");
-    
-    // Insert lunch if we're in lunch window and don't have lunch yet
-    if (!alreadyHasLunch && currentTime >= LUNCH_WINDOW.start && currentTime <= LUNCH_WINDOW.end) {
-      const lunchStart = Math.max(currentTime, LUNCH_WINDOW.defaultAt);
-      insertMealBlock(withMeals, "Lunch", lunchStart, 60, "Window-based insertion.");
-      currentTime = lunchStart + 60;
-      dbg("lunch break:inserted", { start_time: minutesToTime(lunchStart), end_time: minutesToTime(lunchStart + 60) });
+      dbg("step:scheduled", { item: item.name, start_time, end_time, currentTime });
+
+      withMeals.push({
+        ...item,
+        estimated_duration: duration,
+        start_time,
+        end_time,
+        travel_time_minutes: travelTime,
+      });
+
+      ensureMealsInWindow();
     }
-    
-    // Insert dinner if we're in dinner window and don't have dinner yet
-    if (!alreadyHasDinner && currentTime >= DINNER_WINDOW.start && currentTime <= DINNER_WINDOW.end) {
-      const dinnerStart = Math.max(currentTime, DINNER_WINDOW.defaultAt);
-      insertMealBlock(withMeals, "Dinner", dinnerStart, 60, "Window-based insertion.");
-      currentTime = dinnerStart + 60;
-      dbg("dinner break:inserted", { start_time: minutesToTime(dinnerStart), end_time: minutesToTime(dinnerStart + 60) });
-    }
-  }
 
   // ---- Smart fail-safes: add appropriate meals based on time -------------
   const hasLunch = hasMeal(withMeals, "lunch");
@@ -231,19 +234,19 @@ export const reconstructItinerary = async (
       order: idx + 1,
     }));
     
-    console.log("✅ Itinerary reconstruction completed:", result.length, "items");
+    console.log("Itinerary reconstruction completed:", result.length, "items");
     return result;
   } catch (error) {
-    console.error("❌ Itinerary reconstruction failed:", error);
+    console.error("Itinerary reconstruction failed:", error);
     // Return a fallback itinerary with basic timing
     const fallback = (rawItinerary || []).map((item, idx) => ({
       ...item,
       order: idx + 1,
-      start_time: "09:00",
+      start_time: startAt,
       end_time: "17:00",
       estimated_duration: 60,
       travel_time_minutes: 0,
-      travel_instructions: "Fallback timing",
+      travel_instructions: "-",
     }));
     return fallback;
   }

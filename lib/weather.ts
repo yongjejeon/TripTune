@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const WEATHER_API_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_KEY;
-console.log("🔑 WEATHER KEY:", WEATHER_API_KEY);
+console.log("[Weather] Key configured:", WEATHER_API_KEY);
 export async function getWeather(lat: number, lon: number) {
   try {
     const res = await axios.get(
@@ -21,7 +21,7 @@ export async function getWeather(lat: number, lon: number) {
 
     return weather; // e.g., "Clear", "Rain", "Clouds"
   } catch (err) {
-    console.error('🌧️ Weather fetch failed:', err);
+    console.error('Weather fetch failed:', err);
     return null;
   }
 }

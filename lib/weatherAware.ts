@@ -48,7 +48,7 @@ export async function getDetailedWeather(lat: number, lon: number): Promise<Weat
   try {
     const API_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_KEY;
     if (!API_KEY) {
-      console.error('🌧️ OpenWeather API key not found');
+      console.error('OpenWeather API key not found');
       return null;
     }
 
@@ -72,7 +72,7 @@ export async function getDetailedWeather(lat: number, lon: number): Promise<Weat
       timestamp: new Date().toISOString(),
     };
   } catch (error) {
-    console.error('🌧️ Failed to fetch detailed weather:', error);
+    console.error('Failed to fetch detailed weather:', error);
     return null;
   }
 }
@@ -134,7 +134,7 @@ export async function findIndoorAlternatives(
   maxDistance: number = 5 // km
 ): Promise<any[]> {
   try {
-    console.log(`🔍 Finding indoor alternatives for: ${outdoorActivity.name}`);
+    console.log(`Finding indoor alternatives for: ${outdoorActivity.name}`);
     
     // Get nearby places
     const nearbyPlaces = await fetchPlacesByCoordinates(userLocation.lat, userLocation.lng);
@@ -158,7 +158,7 @@ export async function findIndoorAlternatives(
       .slice(0, 3); // Return top 3 alternatives
       
   } catch (error) {
-    console.error('❌ Failed to find indoor alternatives:', error);
+    console.error('Failed to find indoor alternatives:', error);
     return [];
   }
 }
@@ -172,15 +172,15 @@ export async function adaptItineraryForWeather(
   currentActivityIndex: number = 0
 ): Promise<{ adaptedItinerary: any[]; changes: string[] }> {
   try {
-    console.log('🌧️ Adapting itinerary for weather...');
+    console.log('Adapting itinerary for weather...');
     
     const weather = await getDetailedWeather(userLocation.lat, userLocation.lng);
     if (!weather) {
-      console.warn('⚠️ Could not fetch weather data, skipping adaptation');
+      console.warn('Could not fetch weather data, skipping adaptation');
       return { adaptedItinerary: itinerary, changes: [] };
     }
 
-    console.log(`🌤️ Current weather: ${weather.condition} (${weather.temperature}°C)`);
+    console.log(`Current weather: ${weather.condition} (${weather.temperature} C)`);
     
     const changes: string[] = [];
     const adaptedItinerary = [...itinerary];
@@ -191,7 +191,7 @@ export async function adaptItineraryForWeather(
       const assessment = assessWeatherImpact(weather, activity);
       
       if (assessment.shouldAdapt) {
-        console.log(`🔄 Adapting activity: ${activity.name}`);
+        console.log(`Adapting activity: ${activity.name}`);
         
         // Find indoor alternatives
         const alternatives = await findIndoorAlternatives(activity, userLocation);
@@ -216,7 +216,7 @@ export async function adaptItineraryForWeather(
           // If no alternatives found, add a note
           adaptedItinerary[i] = {
             ...activity,
-            weatherWarning: `⚠️ Outdoor activity - ${weather.condition} expected`,
+            weatherWarning: `Outdoor activity - ${weather.condition} expected`,
             adaptationReason: 'No suitable indoor alternatives found',
           };
           
@@ -231,7 +231,7 @@ export async function adaptItineraryForWeather(
     return { adaptedItinerary, changes };
     
   } catch (error) {
-    console.error('❌ Failed to adapt itinerary for weather:', error);
+    console.error('Failed to adapt itinerary for weather:', error);
     return { adaptedItinerary: itinerary, changes: [] };
   }
 }
@@ -306,9 +306,9 @@ async function saveWeatherContext(weather: WeatherData, location: { lat: number;
     };
     
     await AsyncStorage.setItem('currentWeatherContext', JSON.stringify(weatherContext));
-    console.log('💾 Weather context saved for fatigue calculations');
+    console.log('Weather context saved for fatigue calculations');
   } catch (error) {
-    console.error('❌ Failed to save weather context:', error);
+    console.error('Failed to save weather context:', error);
   }
 }
 
@@ -331,7 +331,7 @@ export async function getWeatherContext(): Promise<WeatherData | null> {
     }
     return null;
   } catch (error) {
-    console.error('❌ Failed to get weather context:', error);
+    console.error('Failed to get weather context:', error);
     return null;
   }
 }

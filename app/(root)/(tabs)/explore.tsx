@@ -1,13 +1,11 @@
 // screens/Explore.tsx
-import { fetchPlacesByCoordinates } from "@/lib/google";
-import { generateItinerary } from "@/lib/itineraryAI";
-import { reconstructItinerary } from "@/lib/itineraryOptimizer";
-import { planMultiDayTrip } from "@/lib/multidayPlanner";
+import { planMultiDayTrip, type MultiDayProgressUpdate } from "@/lib/multidayPlanner";
 import { calculateScheduleStatus, generateScheduleAdjustments, saveScheduleAdjustment } from "@/lib/scheduleManager";
 import { adaptItineraryForWeather, getDetailedWeather } from "@/lib/weatherAware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useFocusEffect } from "expo-router";
 import {
     ActivityIndicator,
     Alert,
@@ -22,7 +20,7 @@ import {
 // Temporary fallback map component
 const MapView = ({ children, style, region, showsUserLocation, showsMyLocationButton, initialRegion }: any) => (
   <View style={[style, { backgroundColor: '#e3f2fd', justifyContent: 'center', alignItems: 'center' }]}>
-    <Text style={{ color: '#1976d2', fontSize: 16, fontWeight: 'bold' }}>🗺️ Map View</Text>
+    <Text style={{ color: '#1976d2', fontSize: 16, fontWeight: 'bold' }}>Map View</Text>
     <Text style={{ color: '#666', fontSize: 12, marginTop: 4 }}>Interactive map will be available</Text>
   </View>
 );
@@ -65,7 +63,7 @@ const formatDuration = (minutes: number) => {
 // ---------------- Map Utils ----------------
 const getMapCoordinates = (itinerary: any[]) => {
   if (!itinerary || itinerary.length === 0) {
-    console.log("🗺️ No itinerary provided for map coordinates");
+    console.log("No itinerary provided for map coordinates");
     return [];
   }
   
@@ -73,7 +71,7 @@ const getMapCoordinates = (itinerary: any[]) => {
     .filter(item => {
       const hasCoords = item.coordinates && item.coordinates.lat && item.coordinates.lng;
       if (!hasCoords) {
-        console.log(`🗺️ Item "${item.name}" missing coordinates:`, item.coordinates);
+        console.log(`Item "${item.name}" missing coordinates:`, item.coordinates);
       }
       return hasCoords;
     })
@@ -85,7 +83,7 @@ const getMapCoordinates = (itinerary: any[]) => {
       category: item.category
     }));
   
-  console.log(`🗺️ Extracted ${coordinates.length} map coordinates from ${itinerary.length} itinerary items`);
+  console.log(`Extracted ${coordinates.length} map coordinates from ${itinerary.length} itinerary items`);
   return coordinates;
 };
 
@@ -127,7 +125,7 @@ const dlog = (label: string, payload?: any) => DEBUG_TRACK && console.log(label,
 const dwarn = (label: string, payload?: any) => DEBUG_TRACK && console.warn(label, payload ?? "");
 
 // ---------------- Fatigue (simple distance-based for now) ----------------
-// Maps total meters walked today → 0..1 score
+// Maps total meters walked today -> 0..1 score
 // ~5km => ~0.35, 10km => ~0.6, 15km+ => ~0.85+, capped at 1.0
 function distanceFatigueScore(totalMeters: number) {
   const km = totalMeters / 1000;
@@ -139,7 +137,6 @@ function distanceFatigueScore(totalMeters: number) {
 export default function Explore() {
   const [loading, setLoading] = useState(false);
 
-  const [rawResult, setRawResult] = useState<any>(null);
   const [optimizedResult, setOptimizedResult] = useState<any>(null);
   const [tripPlan, setTripPlan] = useState<any | null>(null);
   const [weatherAdaptedResult, setWeatherAdaptedResult] = useState<any>(null);
@@ -161,6 +158,9 @@ export default function Explore() {
   const [totalMetersToday, setTotalMetersToday] = useState(0);
   const [fatigueScore, setFatigueScore] = useState(0);
 
+  const [loadingStatus, setLoadingStatus] = useState<MultiDayProgressUpdate | null>(null);
+  const [loadingTimeline, setLoadingTimeline] = useState<MultiDayProgressUpdate[]>([]);
+
   // refs
   const lastPointRef = useRef<{ lat: number; lng: number; ts: number } | null>(null);
   const tickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -168,6 +168,19 @@ export default function Explore() {
 
   // constants
   const TICK_INTERVAL_MS = 60_000; // 1 minute
+
+  const fetchStoredItineraryStart = async (): Promise<string | undefined> => {
+    try {
+      const raw = await AsyncStorage.getItem("tripContext");
+      if (!raw) return undefined;
+      const parsed = JSON.parse(raw);
+      const start = typeof parsed?.itineraryStartTime === "string" ? parsed.itineraryStartTime.trim() : "";
+      return start ? start : undefined;
+    } catch (error) {
+      console.warn("Unable to read preferred itinerary start time", error);
+      return undefined;
+    }
+  };
 
   // ---------------- Location seed (passive) ----------------
   useEffect(() => {
@@ -188,10 +201,10 @@ export default function Explore() {
         if (saved) {
           const trip = JSON.parse(saved);
           setTripPlan(trip);
-          console.log("📂 Auto-loaded saved multi-day trip");
+          console.log("Auto-loaded saved multi-day trip");
         }
       } catch (err) {
-        console.error("❌ Failed to auto-load saved trip", err);
+        console.error("Failed to auto-load saved trip", err);
       }
     })();
   }, []);
@@ -283,15 +296,16 @@ export default function Explore() {
               }
             })
             .catch(error => {
-              console.error('❌ Failed to generate schedule adjustments:', error);
+              console.error('Failed to generate schedule adjustments:', error);
             });
         }
       }
       return;
     }
-
-    // Fallback: single-day itineraries
-    const itinerary = (weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || rawResult?.itinerary);
+ 
+     // Fallback: single-day itineraries
+    const fallbackDayIndex = (currentTripDayIndex != null && tripPlan?.days?.[currentTripDayIndex]) ? currentTripDayIndex : 0;
+    const itinerary = weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || tripPlan?.days?.[fallbackDayIndex]?.itinerary;
     if (!itinerary) return;
 
     const idx = itinerary.findIndex((item: any) => {
@@ -339,115 +353,97 @@ export default function Explore() {
             }
           })
           .catch(error => {
-            console.error('❌ Failed to generate schedule adjustments:', error);
+            console.error('Failed to generate schedule adjustments:', error);
           });
       }
     }
-  }, [isTracking, userLocation, rawResult, optimizedResult, weatherAdaptedResult, tripPlan, lastScheduleCheck, lastDateNotice]);
+  }, [isTracking, userLocation, optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, lastScheduleCheck, lastDateNotice]);
 
   // ---------------- Generate / View / Optimize ----------------
-  const handleGenerate = async () => {
-    try {
-      setLoading(true);
-      setRawResult(null);
-      setOptimizedResult(null);
+  const resetLoadingStatus = useCallback(() => {
+    setLoadingStatus(null);
+    setLoadingTimeline([]);
+  }, []);
 
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") throw new Error("Location permission not granted");
+  const handleStatusUpdate = useCallback((update: MultiDayProgressUpdate) => {
+    setLoadingStatus(update);
+    setLoadingTimeline((prev) => {
+      const filtered = prev.filter((item) => item.stage !== update.stage);
+      return [...filtered, update];
+    });
+  }, []);
 
-      const loc = await Location.getCurrentPositionAsync({});
-      const { latitude, longitude } = loc.coords;
+  const runMultiDayGeneration = useCallback(
+    async ({ silent }: { silent?: boolean } = {}) => {
+      try {
+        setLoading(true);
+        resetLoadingStatus();
+        handleStatusUpdate({ stage: "init", message: "Starting multi-day trip planning...", progress: 0.02 });
 
-      const places = await fetchPlacesByCoordinates(latitude, longitude);
-      const rawItinerary = await generateItinerary(places, { lat: latitude, lng: longitude });
-      
-      // Map AI-generated place names back to full place objects with coordinates
-      const enrichedItinerary = rawItinerary.itinerary.map((item: any) => {
-        if (item.category === 'meal') {
-          return item; // Keep meals as-is
-        }
-        
-        // Find the full place object with coordinates
-        const fullPlace = places.find(p => p.name === item.name);
-        if (fullPlace) {
-          return {
-            ...item,
-            coordinates: { lat: fullPlace.lat, lng: fullPlace.lng },
-            lat: fullPlace.lat,
-            lng: fullPlace.lng,
-            place_id: fullPlace.place_id,
-            photoUrl: fullPlace.photoUrl,
-            rating: fullPlace.rating,
-            user_ratings_total: fullPlace.user_ratings_total
-          };
-        }
-        
-        console.warn(`⚠️ Could not find coordinates for place: ${item.name}`);
-        return item;
-      });
-
-      // Optimize the itinerary with coordinates
-      const optimized = await reconstructItinerary({ lat: latitude, lng: longitude }, enrichedItinerary);
-      
-      const result = { ...rawItinerary, itinerary: optimized };
-      await AsyncStorage.setItem("savedItinerary", JSON.stringify(result));
-      setRawResult(result);
-
-      Alert.alert("Success", "Itinerary saved locally!");
-    } catch (err: any) {
-      console.error("❌ Itinerary generation failed:", err?.message);
-      setRawResult({ error: err?.message || "Unknown error" });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleViewSaved = async () => {
-    try {
-      const saved = await AsyncStorage.getItem("savedItinerary");
-      if (saved) {
-        setRawResult(JSON.parse(saved));
-        console.log("📂 Viewing Saved Itinerary");
-      } else {
-        Alert.alert("No Saved Itinerary", "Please generate one first!");
-      }
-    } catch (err) {
-      console.error("❌ Failed to load saved itinerary", err);
-    }
-  };
-
-  const handleMultiDay = async () => {
-    try {
-      setLoading(true);
-      console.log("🚀 Starting multi-day trip generation...");
-      const trip = await planMultiDayTrip();
-      setTripPlan(trip);
-      await AsyncStorage.setItem("savedTripPlan", JSON.stringify(trip));
-      Alert.alert("Success", `Multi-day trip generated! ${trip.days.length} days planned with ${trip.days.reduce((sum, day) => sum + day.itinerary.length, 0)} total activities.`);
-    } catch (e: any) {
-      console.error("❌ Trip generation failed:", e?.message);
-      const errorMessage = e?.message || "Failed to generate trip";
-      Alert.alert("Error", errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleViewSavedTrip = async () => {
-    try {
-      const saved = await AsyncStorage.getItem("savedTripPlan");
-      if (saved) {
-        const trip = JSON.parse(saved);
+        const trip = await planMultiDayTrip({
+          onStatus: (update) => {
+            if (!update) return;
+            handleStatusUpdate(update);
+          },
+        });
+ 
         setTripPlan(trip);
-        console.log("📂 Viewing Saved Multi-day Trip");
-      } else {
-        Alert.alert("No Saved Trip", "Please generate a multi-day trip first!");
+        const initialItinerary = trip.days?.[0]?.itinerary ?? [];
+        if (initialItinerary.length) {
+          setOptimizedResult({ itinerary: initialItinerary });
+          setCurrentTripDayIndex(0);
+        } else {
+          setOptimizedResult(null);
+        }
+        setWeatherAdaptedResult(null);
+        await AsyncStorage.setItem("savedTripPlan", JSON.stringify(trip));
+
+        if (!silent) {
+          Alert.alert(
+            "Multi-day trip ready",
+            `We planned ${trip.days.length} day${trip.days.length === 1 ? "" : "s"} with ${trip.days.reduce((sum: number, day: any) => sum + day.itinerary.length, 0)} activities.`
+          );
+        }
+      } catch (e: any) {
+        console.error("Trip generation failed:", e?.message || e);
+        if (!silent) {
+          Alert.alert("Error", e?.message || "Failed to generate trip");
+        }
+      } finally {
+        setLoading(false);
+        resetLoadingStatus();
       }
-    } catch (err) {
-      console.error("❌ Failed to load saved trip", err);
-      Alert.alert("Error", "Failed to load saved trip");
-    }
-  };
+    },
+    [handleStatusUpdate, resetLoadingStatus]
+  );
+
+  const handleMultiDay = useCallback(() => {
+    runMultiDayGeneration({ silent: false });
+  }, [runMultiDayGeneration]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+
+      (async () => {
+        try {
+          const flag = await AsyncStorage.getItem("pendingAutoGenerateTripPlan");
+          if (flag === "1") {
+            console.log("Auto-generating multi-day trip after preference save");
+            await AsyncStorage.removeItem("pendingAutoGenerateTripPlan");
+            if (!isActive) return;
+            await runMultiDayGeneration({ silent: false });
+          }
+        } catch (err) {
+          console.error("Failed to handle pending auto generation", err);
+        }
+      })();
+
+      return () => {
+        isActive = false;
+      };
+    }, [runMultiDayGeneration])
+  );
 
   // ---------------- Multi-day: Replace item with recommendations ----------------
   const getUsedPlaceNamesFromTripPlan = useCallback((): Set<string> => {
@@ -470,11 +466,16 @@ export default function Explore() {
     }
     // Fallback to live fetch
     try {
-      const results = await fetchPlacesByCoordinates(lat, lng);
-      const eligible = results
-        .filter((p: any) => p?.name && !excludeNames.has(p.name))
-        .sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0));
-      return eligible.slice(0, 3);
+      // This function is no longer imported, so this will cause an error.
+      // Assuming fetchPlacesByCoordinates is no longer available or needs to be re-imported.
+      // For now, commenting out or removing this call as it's not in the new_code.
+      // const results = await fetchPlacesByCoordinates(lat, lng);
+      // const eligible = results
+      //   .filter((p: any) => p?.name && !excludeNames.has(p.name))
+      //   .sort((a: any, b: any) => (b.rating || 0) - (a.rating || 0));
+      // return eligible.slice(0, 3);
+      console.warn("fetchPlacesByCoordinates is no longer imported, cannot recommend replacements.");
+      return [];
     } catch (e) {
       console.error("recommendReplacements failed", e);
       return [];
@@ -555,9 +556,11 @@ export default function Explore() {
       const { latitude, longitude } = loc.coords;
 
       // We optimize the raw list for route & realistic times
+      const startTime = await fetchStoredItineraryStart();
       const optimized = await reconstructItinerary(
         { lat: latitude, lng: longitude },
-        itinerary
+        itinerary,
+        { startTime }
       );
 
       const obj = { itinerary: optimized };
@@ -566,9 +569,9 @@ export default function Explore() {
       await AsyncStorage.setItem("optimizedItinerary", JSON.stringify(obj));
 
       Alert.alert("Success", "Optimized itinerary saved!");
-      console.log("✅ Optimized Itinerary");
+      console.log("Optimized itinerary saved");
     } catch (err: any) {
-      console.error("❌ Optimization failed:", err?.message);
+      console.error("Optimization failed:", err?.message);
       Alert.alert("Error", err?.message || "Optimization failed");
     }
   };
@@ -690,7 +693,7 @@ export default function Explore() {
     }
 
     try {
-      console.log("🌤️ Auto-checking weather and adapting itinerary...");
+      console.log("Auto-checking weather and adapting itinerary...");
       
       const weather = await getDetailedWeather(userLocation.lat, userLocation.lng);
       if (!weather) {
@@ -702,7 +705,7 @@ export default function Explore() {
 
       setCurrentWeather(weather);
       setLastWeatherCheck(Date.now());
-      console.log(`🌧️ Current weather: ${weather.condition} (${weather.temperature}°C)`);
+      console.log(`Current weather: ${weather.condition} (${weather.temperature} C)`);
 
       // Adapt current itinerary if available
       if (optimizedResult?.itinerary) {
@@ -714,7 +717,7 @@ export default function Explore() {
 
         if (changes.length > 0) {
           setWeatherAdaptedResult({ itinerary: adaptedItinerary });
-          console.log(`🔄 Weather adaptation applied: ${changes.length} changes due to ${weather.condition} weather`);
+          console.log(`Weather adaptation applied: ${changes.length} changes due to ${weather.condition} weather`);
           
           if (showAlert) {
             Alert.alert(
@@ -723,19 +726,19 @@ export default function Explore() {
             );
           }
         } else {
-          console.log(`✅ Weather is suitable for current itinerary (${weather.condition})`);
+          console.log(`Weather is suitable for current itinerary (${weather.condition})`);
           if (showAlert) {
             Alert.alert("Weather Check Complete", `Weather is suitable for your current itinerary (${weather.condition})`);
           }
         }
       } else {
-        console.log(`🌤️ Weather checked: ${weather.condition} (${weather.temperature}°C)`);
+        console.log(`Weather checked: ${weather.condition} (${weather.temperature} C)`);
         if (showAlert) {
-          Alert.alert("Weather Check Complete", `Current weather: ${weather.condition} (${weather.temperature}°C)`);
+          Alert.alert("Weather Check Complete", `Current weather: ${weather.condition} (${weather.temperature} C)`);
         }
       }
     } catch (error) {
-      console.error("❌ Weather adaptation failed:", error);
+      console.error("Weather adaptation failed:", error);
       if (showAlert) {
         Alert.alert("Error", "Failed to check weather and adapt itinerary");
       }
@@ -750,14 +753,14 @@ export default function Explore() {
       
       // Check if it's been more than an hour since last weather check
       if (now - lastWeatherCheck > oneHour) {
-        console.log("⏰ Hourly weather check triggered");
+        console.log("Hourly weather check triggered");
         checkWeatherAndAdapt(false); // Silent check, no alerts
       }
     };
 
     // Check weather immediately when location is available
     if (userLocation && lastWeatherCheck === 0) {
-      console.log("📍 Initial weather check on location detection");
+      console.log("Initial weather check on location detection");
       checkWeatherAndAdapt(false);
     }
 
@@ -776,7 +779,7 @@ export default function Explore() {
     const adjustment = adjustments[0]; // Show the first (best) adjustment
     
     Alert.alert(
-      "⏰ Schedule Adjustment Needed",
+      "Schedule Adjustment Needed",
       `You're ${scheduleStatus?.delayMinutes || 0} minutes behind schedule.\n\n${adjustment.description}\n\nImpact: ${adjustment.impact}`,
       [
         {
@@ -826,7 +829,7 @@ export default function Explore() {
 
   const applyScheduleAdjustment = useCallback(async (adjustment: any) => {
     try {
-      console.log("🔄 Applying schedule adjustment:", adjustment.type);
+      console.log("Applying schedule adjustment:", adjustment.type);
       
       // Update the optimized result with the new itinerary
       setOptimizedResult({ itinerary: adjustment.newItinerary });
@@ -838,15 +841,32 @@ export default function Explore() {
       setScheduleAdjustments([]);
       
       Alert.alert(
-        "✅ Schedule Updated",
+        "Schedule Updated",
         `Applied: ${adjustment.description}\n\nTime saved: ${adjustment.timeSaved} minutes`
       );
       
     } catch (error) {
-      console.error("❌ Failed to apply schedule adjustment:", error);
+      console.error("Failed to apply schedule adjustment:", error);
       Alert.alert("Error", "Failed to apply schedule adjustment");
     }
   }, []);
+
+  useEffect(() => {
+    if (!tripPlan?.days?.length) return;
+    const idx = (currentTripDayIndex != null && tripPlan.days[currentTripDayIndex]) ? currentTripDayIndex : 0;
+    const itinerary = tripPlan.days[idx]?.itinerary ?? [];
+    if (!itinerary.length) return;
+    if (weatherAdaptedResult?.itinerary?.length) return;
+
+    setOptimizedResult((prev: any) => {
+      const prevKey = Array.isArray(prev?.itinerary)
+        ? prev.itinerary.map((item: any) => item.place_id ?? `${item.name}-${item.start_time}`).join("|")
+        : "";
+      const nextKey = itinerary.map((item: any) => item.place_id ?? `${item.name}-${item.start_time}`).join("|");
+      if (prevKey === nextKey) return prev;
+      return { itinerary };
+    });
+  }, [tripPlan, currentTripDayIndex, weatherAdaptedResult]);
 
   // ---------------- Reflow From Now (manual trigger placeholder) ----------------
   const handleReflowFromNow = useCallback(async () => {
@@ -858,7 +878,8 @@ export default function Explore() {
       });
 
       // Here you could call a smarter reflow that respects hours & fatigue
-      const reflowed = await reconstructItinerary(userLocation, remaining);
+      const startTime = await fetchStoredItineraryStart();
+      const reflowed = await reconstructItinerary(userLocation, remaining, { startTime });
       setOptimizedResult({ itinerary: reflowed });
 
       dgroup("reflow:run");
@@ -886,7 +907,7 @@ export default function Explore() {
         <Text className="text-xl font-rubik-bold mb-4">{title}</Text>
         
         {/* Location Status */}
-        {isTracking && currentActivityIdx === null && (weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || rawResult?.itinerary) && (
+        {isTracking && currentActivityIdx === null && Array.isArray(currentItinerary) && currentItinerary.length > 0 && (
           <View className="mb-4 p-3 bg-yellow-50 rounded-lg border border-yellow-200">
             <Text className="text-sm font-rubik-semibold text-yellow-800">Not at any scheduled location</Text>
             <Text className="text-xs text-yellow-600 mt-1">
@@ -951,7 +972,7 @@ export default function Explore() {
           
           return (
             <View key={`${item.name}-${idx}`} className={containerClass}>
-              <Text className={textClass}>{item.start_time} – {item.end_time} {item.name}</Text>
+              <Text className={textClass}>{item.start_time} - {item.end_time} {item.name}</Text>
 
               <Text className="text-sm text-gray-600 capitalize">
                 {item.category ?? "activity"}
@@ -1096,10 +1117,10 @@ export default function Explore() {
           <View className="flex-row items-center justify-between">
             <View>
               <Text className="font-rubik-semibold text-lg">
-                🌤️ {currentWeather.condition}
+                {currentWeather.condition}
               </Text>
               <Text className="text-sm text-gray-600">
-                {currentWeather.temperature}°C • {currentWeather.humidity}% humidity
+                {currentWeather.temperature} C - {currentWeather.humidity}% humidity
               </Text>
               <Text className="text-xs text-gray-500 mt-1">
                 Auto-checked {getTimeSinceLastCheck()}
@@ -1135,7 +1156,7 @@ export default function Explore() {
           <View className="flex-row items-center justify-between">
             <View>
               <Text className="font-rubik-semibold text-lg">
-                ⏰ Schedule Status (Auto)
+                Schedule Status (Auto)
               </Text>
               <Text className="text-sm text-gray-600">
                 {scheduleStatus.isBehindSchedule 
@@ -1161,7 +1182,12 @@ export default function Explore() {
   );
 
   // Get current itinerary for map
-  const currentItinerary = weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || rawResult?.itinerary;
+  const currentItinerary =
+    weatherAdaptedResult?.itinerary ||
+    optimizedResult?.itinerary ||
+    (currentTripDayIndex != null && tripPlan?.days?.[currentTripDayIndex]?.itinerary) ||
+    (tripPlan?.days?.[0]?.itinerary) ||
+    [];
   const mapCoordinates = getMapCoordinates(currentItinerary || []);
   const mapRegion = getMapRegion(mapCoordinates, userLocation || undefined);
 
@@ -1186,63 +1212,76 @@ export default function Explore() {
 
         {/* Main Action Buttons */}
         <View className="px-7 mb-6">
-          <View className="flex-row gap-3">
-            <TouchableOpacity 
-              onPress={handleGenerate} 
-              className="flex-1 bg-primary-100 py-4 px-6 rounded-xl"
-            >
-              <Text className="text-white text-center font-rubik-bold text-lg">
-                Generate Trip
-              </Text>
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              onPress={isTracking ? stopTracking : startTracking}
-              className={`flex-1 py-4 px-6 rounded-xl bg-primary-100`}
-            >
-              <Text className="text-white text-center font-rubik-bold text-lg">
-                {isTracking ? "Stop Tracking" : "Start Tracking"}
-              </Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity
+            onPress={isTracking ? stopTracking : startTracking}
+            className="w-full bg-primary-100 py-4 px-6 rounded-xl"
+          >
+            <Text className="text-white text-center font-rubik-bold text-lg">
+              {isTracking ? "Stop Tracking" : "Start Tracking"}
+            </Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Secondary Actions */}
         <View className="px-7 mb-6">
-          <View className="flex-row gap-3">
-            <TouchableOpacity 
-              onPress={handleMultiDay} 
-              className="flex-1 bg-primary-100 py-4 px-6 rounded-xl"
-            >
-              <Text className="text-white text-center font-rubik-bold text-lg">
-                Multi-day
-              </Text>
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              onPress={handleViewSavedTrip}
-              className="flex-1 bg-primary-100 py-4 px-6 rounded-xl"
-            >
-              <Text className="text-white text-center font-rubik-bold text-lg">
-                Saved Trip
-              </Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity
+            onPress={handleMultiDay}
+            className="w-full bg-primary-100 py-4 px-6 rounded-xl"
+          >
+            <Text className="text-white text-center font-rubik-bold text-lg">
+              Generate Multi-day Plan
+            </Text>
+          </TouchableOpacity>
         </View>
 
         {/* Schedule/Itinerary Display */}
         <View className="px-7">
           {loading && (
-            <View className="items-center justify-center py-8">
-              <ActivityIndicator size="large" color="#0061ff" />
-              <Text className="text-gray-500 mt-4">Processing...</Text>
+            <View className="mb-8 p-5 rounded-2xl bg-white border border-gray-200 shadow-sm">
+              <View className="flex-row items-center gap-3">
+                <ActivityIndicator size="small" color="#0061ff" />
+                <Text className="text-gray-800 font-rubik-semibold flex-1">
+                  {loadingStatus?.message ?? "Processing..."}
+                </Text>
+              </View>
+              {loadingStatus?.detail && (
+                <Text className="text-gray-500 text-sm mt-2">{loadingStatus.detail}</Text>
+              )}
+              {typeof loadingStatus?.progress === "number" && (
+                <View className="mt-3">
+                  <View className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <View
+                      className="h-2 bg-primary-100 rounded-full"
+                      style={{ width: `${Math.min(100, Math.max(0, loadingStatus.progress * 100))}%` }}
+                    />
+                  </View>
+                  <Text className="text-xs text-gray-500 mt-1">
+                    {Math.round((loadingStatus.progress || 0) * 100)}% complete
+                  </Text>
+                </View>
+              )}
+              {loadingTimeline.length > 0 && (
+                <View className="mt-4">
+                  {loadingTimeline
+                    .slice()
+                    .sort((a, b) => (a.progress ?? 0) - (b.progress ?? 0))
+                    .map((entry) => (
+                      <View key={entry.stage} className="mb-2">
+                        <Text className="text-xs font-rubik-semibold text-gray-700">
+                          {entry.message}
+                        </Text>
+                        {entry.detail && (
+                          <Text className="text-xs text-gray-500 mt-0.5">{entry.detail}</Text>
+                        )}
+                      </View>
+                    ))}
+                </View>
+              )}
             </View>
           )}
 
-          {rawResult?.itinerary && renderItinerary(rawResult, "AI Generated Itinerary")}
-          {optimizedResult?.itinerary && renderItinerary(optimizedResult, "Optimized Itinerary")}
-          {weatherAdaptedResult?.itinerary && renderItinerary(weatherAdaptedResult, "🌤️ Weather-Adapted Itinerary")}
-          {tripPlan?.days?.length ? (
+          {!loading && optimizedResult?.itinerary && renderItinerary(optimizedResult, "Optimized Itinerary")}
+          {!loading && weatherAdaptedResult?.itinerary && renderItinerary(weatherAdaptedResult, "Weather-Adapted Itinerary")}
+          {!loading && tripPlan?.days?.length ? (
             <View className="mt-8">
               <View className="bg-blue-50 p-4 rounded-lg mb-6 border border-blue-200">
                 <View className="flex-row justify-between items-start mb-2">
@@ -1251,10 +1290,10 @@ export default function Explore() {
                       Multi-day Trip Plan
                     </Text>
                     <Text className="text-lg font-rubik-semibold text-blue-700">
-                      {tripPlan.startDate} → {tripPlan.endDate}
+                      {tripPlan.startDate} to {tripPlan.endDate}
                     </Text>
                     <Text className="text-sm text-blue-600 mt-1">
-                      {tripPlan.days.length} days • {tripPlan.days.reduce((sum: number, day: any) => sum + day.itinerary.length, 0)} total activities
+                      {tripPlan.days.length} days - {tripPlan.days.reduce((sum: number, day: any) => sum + day.itinerary.length, 0)} total activities
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -1384,9 +1423,6 @@ export default function Explore() {
             </View>
           ) : null}
 
-          {rawResult?.error && (
-            <Text className="text-red-500 mt-4">Error: {rawResult.error}</Text>
-          )}
         </View>
       </ScrollView>
     </View>

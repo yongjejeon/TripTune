@@ -69,7 +69,7 @@ export async function generateItinerary(city: string) {
 
     const secondCoords = `${secondAttraction.geometry.location.lat},${secondAttraction.geometry.location.lng}`;
 
-    // 4. Café near second attraction
+    // 4. Cafe near second attraction
     await sleep(1500);
     const cafes = await fetchNearby(secondCoords, 'cafe', 1500);
     const bestCafe = cafes
@@ -104,7 +104,7 @@ export async function generateItinerary(city: string) {
 
     console.log('Final itinerary:');
     itinerary.forEach((p, i) => {
-      console.log(`${i + 1}. ${p.name} - ${p.types?.[0]} - ⭐️ ${p.rating}`);
+      console.log(`${i + 1}. ${p.name} - ${p.types?.[0]} - Rating ${p.rating}`);
     });
 
     return itinerary;

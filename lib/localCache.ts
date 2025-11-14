@@ -19,7 +19,7 @@ export type CachedDetails = {
   details: any;         // raw Place Details result (hours, address, etc.)
 };
 
-// ~5–6km cell near equator (adjust if you want)
+// ~5-6km cell near equator (adjust if you want)
 export function geoKeyFromLatLng(lat: number, lng: number, cell = 0.05) {
   const rl = (x: number) => Math.round(x / cell) * cell;
   return `${rl(lat).toFixed(2)},${rl(lng).toFixed(2)}@${cell.toFixed(2)}`;

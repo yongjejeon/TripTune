@@ -47,7 +47,7 @@ export default function TestConnection() {
     })();
   }, []);
 
-  // 2) Optional: “live” polling for the latest *single* sample (UI feedback only)
+  // 2) Optional: "live" polling for the latest *single* sample (UI feedback only)
   useEffect(() => {
     if (authorized !== true || !polling) return;
 
@@ -57,7 +57,7 @@ export default function TestConnection() {
         setHr(bpm);
         setAt(at);
         const age = at ? Math.round((Date.now() - new Date(at).getTime()) / 1000) : null;
-        console.log(`[UI] live poll → bpm=${bpm ?? "∅"} at=${at ?? "∅"} ageSec=${age ?? "∅"}`);
+        console.log(`[UI] live poll -> bpm=${bpm ?? "empty"} at=${at ?? "empty"} ageSec=${age ?? "empty"}`);
       } catch (e: any) {
         console.log("HR poll error:", e?.message ?? e);
       }
@@ -87,7 +87,7 @@ export default function TestConnection() {
 
   // 3) Fetch *all* samples in last 60 min (to see dense data)
   const handleFetchSeries = async () => {
-    console.log("[UI] Fetching series (60 min) …");
+    console.log("[UI] Fetching series (60 min) ...");
     const s = await readHeartRateSeries(60);
     setSeries(s);
     if (s.length) {
@@ -101,12 +101,12 @@ export default function TestConnection() {
 
   // 4) Fetch the most recent *chunk* (batch) of samples
   const handleFetchLatestChunk = async () => {
-    console.log("[UI] Fetching latest chunk …");
+    console.log("[UI] Fetching latest chunk ...");
     const c = await readLatestChunk(180); // last 3h window for safety
     setChunk(c);
     if (c.length) {
       console.log(
-        `[UI] Latest chunk count=${c.length} range=${c[0].at} → ${c.at(-1)?.at}`
+        `[UI] Latest chunk count=${c.length} range=${c[0].at} -> ${c.at(-1)?.at}`
       );
     } else {
       console.log("[UI] Latest chunk is empty");
@@ -124,7 +124,7 @@ export default function TestConnection() {
             const ageSec = Math.round((Date.now() - new Date(s.at).getTime()) / 1000);
             return (
               <Text key={i} style={{ color: "white", marginBottom: 6 }}>
-                {new Date(s.at).toLocaleTimeString()} → {s.bpm} bpm  ({ageSec}s ago)
+                {new Date(s.at).toLocaleTimeString()} -> {s.bpm} bpm  ({ageSec}s ago)
               </Text>
             );
           })
@@ -147,7 +147,7 @@ export default function TestConnection() {
 
         {/* Live latest (single value) */}
         <Text className="text-white text-5xl font-rubik-extrabold mb-2">
-          {hr != null ? `${hr} bpm` : "—"}
+          {hr != null ? `${hr} bpm` : "-"}
         </Text>
         <Text className="text-white opacity-70 mb-6">
           {at
@@ -156,9 +156,9 @@ export default function TestConnection() {
                 return `${new Date(at).toLocaleTimeString()} (${age}s ago)`;
               })()
             : authorized === null
-            ? "Initializing…"
+            ? "Initializing..."
             : authorized
-            ? "Waiting for recent heart rate…"
+            ? "Waiting for recent heart rate..."
             : "Not authorized"}
         </Text>
 

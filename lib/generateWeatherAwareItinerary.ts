@@ -110,7 +110,7 @@ export async function generateItinerary(city: string) {
 
   console.log('Final Itinerary:');
   itinerary.forEach((p, i) => {
-    console.log(`${i + 1}. ${p.name} - ${p.types?.[0]} - ⭐️ ${p.rating}`);
+    console.log(`${i + 1}. ${p.name} - ${p.types?.[0]} - Rating ${p.rating}`);
   });
 
   return itinerary;

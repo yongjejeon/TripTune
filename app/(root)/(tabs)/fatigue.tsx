@@ -75,7 +75,7 @@ export default function Fatigue() {
         <View className="bg-gray-50 p-6 rounded-xl mb-6 w-full max-w-sm">
           <View className="items-center mb-4">
             <Text className="text-4xl font-rubik-bold text-gray-900 mb-2">
-              {isLoading ? "..." : (bpm != null ? `${bpm}` : "—")}
+              {isLoading ? "..." : (bpm != null ? `${bpm}` : "-")}
             </Text>
             <Text className="text-lg text-gray-600">BPM</Text>
           </View>
@@ -94,13 +94,13 @@ export default function Fatigue() {
             <View className="flex-row justify-between">
               <Text className="text-gray-600">Last Sample:</Text>
               <Text className="text-gray-900">
-                {last ? new Date(last).toLocaleTimeString() : "—"}
+                {last ? new Date(last).toLocaleTimeString() : "-"}
               </Text>
             </View>
 
             <View className="flex-row justify-between">
               <Text className="text-gray-600">Updated:</Text>
-              <Text className="text-gray-900">{updatedAt || "—"}</Text>
+              <Text className="text-gray-900">{updatedAt || "-"}</Text>
             </View>
           </View>
         </View>
@@ -137,7 +137,7 @@ export default function Fatigue() {
 
         <View className="mt-6 p-4 bg-blue-50 rounded-lg">
           <Text className="text-sm text-blue-800 text-center">
-            💡 Tip: Enable continuous heart rate monitoring in Samsung Health settings for automatic updates
+            Tip: Enable continuous heart rate monitoring in Samsung Health settings for automatic updates
           </Text>
         </View>
       </View>
