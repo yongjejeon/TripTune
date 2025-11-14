@@ -1,33 +1,30 @@
 // screens/Index.tsx
 import CalendarRangePicker, { DateISO } from "@/lib/components/calendar";
+import LocationMapPicker from "@/lib/components/LocationMapPicker";
 import { fetchPlacesByCoordinates, FetchProgressUpdate } from "@/lib/google";
 import { inferPreferencesFromSelections } from "@/lib/preferences";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
+import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from "react-native";
+import DateTimePickerModal from "react-native-modal-datetime-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
-import LocationMapPicker from "@/lib/components/LocationMapPicker";
-import { GooglePlacesAutocomplete } from "react-native-google-places-autocomplete";
 
 const PERF = true;
 const t = (label: string) => PERF && console.time(label);
 const tend = (label: string) => PERF && console.timeEnd(label);
-
-const TIME_24H_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
-const START_TIME_OPTIONS = ["08:00", "09:00", "10:00", "11:00"];
 
 const formatGeocodedAddress = (address: Location.LocationGeocodedAddress | undefined | null) => {
   if (!address) return "";
@@ -46,6 +43,30 @@ const formatGeocodedAddress = (address: Location.LocationGeocodedAddress | undef
   return parts.join(", ") || locality || streetLine || country || "";
 };
 
+const formatDateLabel = (value?: string) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+};
+
+const parseTimeToDate = (time: string) => {
+  const [hours, minutes] = time.split(":").map((part) => parseInt(part, 10));
+  const now = new Date();
+  now.setHours(Number.isFinite(hours) ? hours : 9, Number.isFinite(minutes) ? minutes : 0, 0, 0);
+  return now;
+};
+
+const formatTimeFromDate = (date: Date) => {
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+};
+
 export default function Index() {
   const router = useRouter();
   const [city, setCity] = useState("");
@@ -54,6 +75,7 @@ export default function Index() {
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [mapRefining, setMapRefining] = useState(false);
   const [manualLookupLoading, setManualLookupLoading] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
 
   const placesApiKey = process.env.EXPO_PUBLIC_GOOGLE_API_KEY ?? "";
 
@@ -150,13 +172,6 @@ export default function Index() {
       return next;
     });
   }
-
-  const isValidStartTime = (value: string) => TIME_24H_RE.test(value.trim());
-
-  const handleStartTimeChange = (value: string) => {
-    const cleaned = value.replace(/[^0-9:]/g, "");
-    setItineraryStart(cleaned.slice(0, 5));
-  };
 
   const normalizedLoadingProgress = (() => {
     const value = loadingProgress?.value ?? 0;
@@ -274,13 +289,6 @@ export default function Index() {
       // 2) Trip dates validation
       if (!startDate || !endDate) {
         Alert.alert("Trip dates needed", "Please select a start and end date.");
-        setOnboardStep(2);
-        setSavingPreferences(false);
-        return;
-      }
-
-      if (!isValidStartTime(itineraryStart)) {
-        Alert.alert("Daily start time needed", "Please enter your preferred start time in HH:MM format.");
         setOnboardStep(2);
         setSavingPreferences(false);
         return;
@@ -628,11 +636,11 @@ export default function Index() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerClassName="pb-32 px-7">
         
         {/* Welcome Header */}
-        <View className="mt-8 mb-8">
+        <View className="mt-8 mb-8 items-center">
           <Text className="text-3xl font-rubik-bold text-gray-900 mb-2">
             Welcome to TripTune
           </Text>
-          <Text className="text-lg text-gray-600">
+          <Text className="text-lg text-gray-600 text-center">
             Let's create your perfect trip experience
           </Text>
         </View>
@@ -766,10 +774,7 @@ export default function Index() {
         {/* Step 2: Trip Dates */}
         {onboardStep === 2 && (
           <View className="mb-8">
-            <Text className="text-2xl font-rubik-bold mb-2">When are you traveling?</Text>
-            <Text className="text-gray-600 mb-6">
-              Select your trip dates to plan the perfect multi-day itinerary.
-            </Text>
+ 
 
             <CalendarRangePicker
               initialStart={startDate}
@@ -777,56 +782,52 @@ export default function Index() {
               onConfirm={(range) => {
                 setStartDate(range.startDate);
                 setEndDate(range.endDate);
+                setShowTimePicker(true);
               }}
             />
 
-            <View className="mt-8">
-              <Text className="font-rubik-semibold text-gray-700 text-lg mb-2">
-                What time should your days start?
-              </Text>
-              <Text className="text-gray-500 text-sm mb-4">
-                We'll build each day's plan around this start time.
-              </Text>
-
-              <View className="flex-row flex-wrap gap-3 mb-4">
-                {START_TIME_OPTIONS.map((option) => {
-                  const selected = itineraryStart === option;
-                  return (
-                    <TouchableOpacity
-                      key={option}
-                      onPress={() => setItineraryStart(option)}
-                      className={`px-4 py-3 rounded-xl border-2 ${
-                        selected ? "border-primary-100 bg-primary-50" : "border-gray-300 bg-white"
-                      }`}
-                    >
-                      <Text className={`font-rubik-semibold ${selected ? "text-primary-100" : "text-gray-700"}`}>
-                        {option}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              <Text className="font-rubik-semibold text-gray-700 mb-2">Or enter your own time (24h)</Text>
-              <TextInput
-                placeholder="09:00"
-                value={itineraryStart}
-                onChangeText={handleStartTimeChange}
-                keyboardType="numbers-and-punctuation"
-                autoCapitalize="none"
-                autoCorrect={false}
-                className={`border rounded-xl px-4 py-4 text-lg ${
-                  isValidStartTime(itineraryStart) ? "border-gray-300" : "border-red-400"
-                }`}
-              />
-              {!isValidStartTime(itineraryStart) && (
-                <Text className="text-red-500 text-xs mt-2">
-                  Use HH:MM in 24-hour format (e.g., 09:30).
+            {startDate || endDate ? (
+              <View className="mt-4 border border-gray-200 rounded-xl px-4 py-3 bg-white">
+                <Text className="text-sm font-rubik-medium text-gray-900">
+                  Start: {startDate ? formatDateLabel(startDate) : "—"}
                 </Text>
-              )}
-            </View>
+                <Text className="text-sm font-rubik-medium text-gray-900 mt-2">
+                  End: {endDate ? formatDateLabel(endDate) : "—"}
+                </Text>
+              </View>
+            ) : null}
 
-            <View className="flex-row gap-4 mt-8">
+            {startDate && endDate ? (
+              <View className="mt-6 border border-primary-100 bg-primary-50/40 rounded-2xl p-5 items-center">
+                <Text className="font-rubik-semibold text-primary-900 mb-2">Selected dates</Text>
+                <Text className="text-primary-900 text-sm font-rubik-medium text-center">
+                  {formatDateLabel(startDate)} → {formatDateLabel(endDate)}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setShowTimePicker(true)}
+                  className="mt-4 px-5 py-2 rounded-full border border-primary-100"
+                >
+                  <Text className="text-primary-100 font-rubik-semibold text-sm">
+                    Adjust start time ({itineraryStart})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+
+            <DateTimePickerModal
+              isVisible={showTimePicker}
+              mode="time"
+              date={parseTimeToDate(itineraryStart)}
+              minuteInterval={1}
+              onConfirm={(date) => {
+                const formatted = formatTimeFromDate(date);
+                setItineraryStart(formatted);
+                setShowTimePicker(false);
+              }}
+              onCancel={() => setShowTimePicker(false)}
+            />
+
+            <View className="mt-8 flex-row gap-4">
               <TouchableOpacity
                 onPress={() => setOnboardStep(1)}
                 className="flex-1 bg-gray-200 py-4 px-6 rounded-xl"
@@ -836,18 +837,17 @@ export default function Index() {
               <TouchableOpacity
                 onPress={() => {
                   if (!startDate || !endDate) {
-                    Alert.alert("Missing dates", "Please select both start and end dates.");
-                    return;
-                  }
-                  if (!isValidStartTime(itineraryStart)) {
-                    Alert.alert("Invalid start time", "Please enter a valid HH:MM (24h) start time.");
+                    Alert.alert("Select dates", "Please choose a start and end date before continuing.");
                     return;
                   }
                   setOnboardStep(3);
                 }}
-                className="flex-1 bg-primary-100 py-4 px-6 rounded-xl"
+                className={`flex-1 py-4 px-6 rounded-xl ${startDate && endDate ? "bg-primary-100" : "bg-gray-300"}`}
+                disabled={!startDate || !endDate}
               >
-                <Text className="text-white text-center font-rubik-bold">Continue</Text>
+                <Text className={`text-center font-rubik-bold text-lg ${startDate && endDate ? "text-white" : "text-gray-500"}`}>
+                  Confirm
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -856,8 +856,8 @@ export default function Index() {
         {/* Step 3: Accommodation Location */}
         {onboardStep === 3 && (
           <View className="mb-8">
-            <Text className="text-2xl font-rubik-bold mb-2">Where are you staying?</Text>
-            <Text className="text-gray-600 mb-6">
+            <Text className="text-2xl font-rubik-bold mb-2 text-center">Where are you staying?</Text>
+            <Text className="text-gray-600 mb-6 text-center">
               Set your accommodation location. We will plan around this home base.
             </Text>
  
@@ -1147,7 +1147,7 @@ export default function Index() {
                 } : {}}
               >
                 <Text className={`text-center font-rubik-bold text-lg ${(selectedIds.size >= 3 && !savingPreferences) ? 'text-white' : 'text-gray-500'}`}>
-                  {savingPreferences ? "Saving..." : (selectedIds.size >= 3 ? "Save and Plan Trip" : `Select ${3 - selectedIds.size} more`)}
+                  {savingPreferences ? "Saving..." : (selectedIds.size >= 3 ? "Confirm and Plan Trip" : `Select ${3 - selectedIds.size} more`)}
                 </Text>
               </TouchableOpacity>
             </View>

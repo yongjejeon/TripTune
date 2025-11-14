@@ -59,38 +59,32 @@ const TIME_24H_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const LUNCH_WINDOW = { start: 12 * 60, end: 14 * 60, defaultAt: 12 * 60 + 30 };  // 12:00-14:00 -> default 12:30
 const DINNER_WINDOW = { start: 18 * 60, end: 20 * 60, defaultAt: 18 * 60 + 30 }; // 18:00-20:00 -> default 18:30
 
-const hasMeal = (list: any[], type: "lunch" | "dinner") =>
-  list.some(
-    (m) => {
-      const category = String(m.category || "").toLowerCase();
-      const name = String(m.name || "").toLowerCase();
-      return category === "meal" && (
-        name.includes(type) || 
-        (type === "lunch" && (name.includes("lunch") || name.includes("break"))) ||
-        (type === "dinner" && (name.includes("dinner") || name.includes("evening")))
-      );
+// Helper to add meal suggestions to activity reason/notes
+const addMealSuggestion = (item: any, mealType: "lunch" | "dinner", activityStart: number, activityEnd: number) => {
+  const mealWindow = mealType === "lunch" ? LUNCH_WINDOW : DINNER_WINDOW;
+  const mealTime = minutesToTime(mealWindow.defaultAt);
+  
+  // Check if activity overlaps with meal window
+  const overlapsMealWindow = 
+    (activityStart >= mealWindow.start && activityStart <= mealWindow.end) ||
+    (activityEnd >= mealWindow.start && activityEnd <= mealWindow.end) ||
+    (activityStart < mealWindow.start && activityEnd > mealWindow.end);
+  
+  if (overlapsMealWindow) {
+    const existingReason = item.reason || "";
+    const suggestion = `💡 ${mealType === "lunch" ? "Lunch" : "Dinner"} suggestion: Consider dining at ${item.name} around ${mealTime} or at a nearby restaurant during this visit.`;
+    
+    // Add suggestion to reason if not already present
+    if (!existingReason.toLowerCase().includes(mealType)) {
+      item.mealSuggestion = suggestion;
+      item.reason = existingReason ? `${existingReason}\n\n${suggestion}` : suggestion;
+      dbg(`${mealType} suggestion added`, { 
+        activity: item.name, 
+        activityTime: `${minutesToTime(activityStart)}-${minutesToTime(activityEnd)}`,
+        mealWindow: `${minutesToTime(mealWindow.start)}-${minutesToTime(mealWindow.end)}`
+      });
     }
-  );
-
-const insertMealBlock = (
-  list: any[],
-  label: string,
-  startMin: number,
-  durationMin: number,
-  reason: string
-) => {
-  const start_time = minutesToTime(startMin);
-  const end_time = minutesToTime(startMin + durationMin);
-  list.push({
-    order: list.length + 1,
-    name: label,
-    category: "meal",
-    start_time,
-    end_time,
-    estimated_duration: durationMin,
-    reason,
-  });
-  dbg(`${label.toLowerCase()}:inserted`, { start_time, end_time });
+  }
 };
 
 const resolveStartTime = (value?: string) => {
@@ -140,25 +134,40 @@ export const reconstructItinerary = async (
     const optimizedAttractions = optimizeItinerary(userCoords, attractions, graph, startAt);
     dbg("optimized order", optimizedAttractions.map((a: any) => a.name));
 
-    // Now rebuild a timed plan from the configured start, inserting travel & meals where they fit
-    const withMeals: any[] = [];
-    let currentTime = timeToMinutes(startAt);
-
-    const ensureMealsInWindow = () => {
-      if (!hasMeal(withMeals, "lunch") && currentTime >= LUNCH_WINDOW.start && currentTime <= LUNCH_WINDOW.end) {
-        const lunchStart = Math.max(currentTime, LUNCH_WINDOW.start);
-        insertMealBlock(withMeals, "Lunch", lunchStart, 60, "Auto-inserted before next activity.");
-        currentTime = lunchStart + 60;
-        dbg("lunch break:inserted", { start_time: minutesToTime(lunchStart), end_time: minutesToTime(lunchStart + 60) });
-      }
-
-      if (!hasMeal(withMeals, "dinner") && currentTime >= DINNER_WINDOW.start && currentTime <= DINNER_WINDOW.end) {
-        const dinnerStart = Math.max(currentTime, DINNER_WINDOW.start);
-        insertMealBlock(withMeals, "Dinner", dinnerStart, 60, "Auto-inserted before next activity.");
-        currentTime = dinnerStart + 60;
-        dbg("dinner break:inserted", { start_time: minutesToTime(dinnerStart), end_time: minutesToTime(dinnerStart + 60) });
+    // Helper to parse ISO time to local minutes of day
+    const parseTimeToMinutes = (isoString: string | undefined, contextItem?: any): number | null => {
+      if (!isoString) return null;
+      try {
+        const date = new Date(isoString);
+        // Extract local time hours and minutes from the ISO string
+        // willCloseAt/willOpenAt are in UTC but represent local time
+        // We need to parse the time part correctly
+        const hours = date.getUTCHours();
+        const mins = date.getUTCMinutes();
+        const totalMins = hours * 60 + mins;
+        // Reject invalid times (00:00 could be midnight or invalid)
+        // If it's exactly 00:00, check if it's likely invalid data
+        if (totalMins === 0) {
+          // Check if this is likely a valid midnight or invalid data
+          const now = new Date();
+          const dateDiff = Math.abs(date.getTime() - now.getTime());
+          // If the date is more than 24 hours away, treat 00:00 as invalid (missing data)
+          // Return 23:59 (1439 minutes) as a safe "late closing" time
+          if (dateDiff > 24 * 60 * 60 * 1000) {
+            dbg("treating 00:00 as missing closing time, using 23:59", { item: contextItem?.name || "unknown" });
+            return 23 * 60 + 59; // 23:59 as default late closing
+          }
+        }
+        return totalMins;
+      } catch {
+        return null;
       }
     };
+
+    // Now rebuild a timed plan from the configured start, with meal suggestions instead of blocks
+    const itineraryItems: any[] = [];
+    const mealSuggestions = { lunch: false, dinner: false }; // Track if we've suggested meals
+    let currentTime = timeToMinutes(startAt);
 
     for (let idx = 0; idx < optimizedAttractions.length; idx++) {
       const item = optimizedAttractions[idx];
@@ -177,59 +186,114 @@ export const reconstructItinerary = async (
       currentTime += travelTime;
       dbg("step:arrival", { item: item.name, afterTravel: currentTime, travelTime });
 
-      ensureMealsInWindow();
-
+      // Calculate activity times
       const duration = parseDurationToMinutes(item.estimated_duration);
-      const start_time = minutesToTime(currentTime);
-      currentTime += duration;
-      const end_time = minutesToTime(currentTime);
+      let start_time = minutesToTime(currentTime);
+      let activityStartMinutes = currentTime;
+      let activityEndMinutes = currentTime + duration;
+      let end_time = minutesToTime(activityEndMinutes);
+      
+      // Validate opening time: ensure activity doesn't start before place opens
+      if (item.willOpenAt && item.category !== 'meal') {
+        const openMinutes = parseTimeToMinutes(item.willOpenAt, item);
+        if (openMinutes !== null && activityStartMinutes < openMinutes) {
+          // Activity would start before opening - delay to opening time
+          const delay = openMinutes - activityStartMinutes;
+          activityStartMinutes = openMinutes;
+          start_time = minutesToTime(activityStartMinutes);
+          activityEndMinutes = activityStartMinutes + duration;
+          end_time = minutesToTime(activityEndMinutes);
+          currentTime = activityStartMinutes; // Update currentTime for next activity
+          dbg("adjusted for opening time", {
+            item: item.name,
+            originalStart: minutesToTime(currentTime - travelTime),
+            openingTime: minutesToTime(openMinutes),
+            adjustedStart: start_time,
+            delayMinutes: delay
+          });
+        }
+      }
+      
+      // Add meal suggestions if activity overlaps with meal windows
+      addMealSuggestion(item, "lunch", activityStartMinutes, activityEndMinutes);
+      addMealSuggestion(item, "dinner", activityStartMinutes, activityEndMinutes);
+      
+      // Validate closing time: ensure activity can finish before place closes
+      if (item.willCloseAt && item.category !== 'meal') {
+        const closeMinutes = parseTimeToMinutes(item.willCloseAt, item);
+        if (closeMinutes !== null && activityEndMinutes > closeMinutes) {
+          // Activity would end after closing
+          const availableTime = closeMinutes - activityStartMinutes - 5; // Leave 5 min buffer
+          const minimumDuration = Math.max(45, duration * 0.5); // Need at least 45 min or 50% of original duration
+          
+          if (availableTime >= minimumDuration && activityStartMinutes < closeMinutes - 30) {
+            // We have enough time - adjust to fit before closing
+            const adjustedDuration = Math.max(minimumDuration, Math.min(availableTime, duration));
+            activityEndMinutes = activityStartMinutes + adjustedDuration;
+            end_time = minutesToTime(activityEndMinutes);
+            dbg("adjusted for closing time", { 
+              item: item.name, 
+              originalEnd: minutesToTime(activityStartMinutes + duration),
+              closingTime: minutesToTime(closeMinutes),
+              adjustedEnd: end_time,
+              adjustedDuration: adjustedDuration,
+              originalDuration: duration,
+              minimumRequired: minimumDuration
+            });
+          } else {
+            // Not enough time - skip this activity
+            dbg("skipping activity - not enough time before closing", { 
+              item: item.name,
+              startTime: start_time,
+              closingTime: minutesToTime(closeMinutes),
+              wouldEndAt: minutesToTime(activityEndMinutes),
+              availableMinutes: availableTime,
+              minimumRequired: minimumDuration
+            });
+            continue;
+          }
+        }
+      }
 
-      dbg("step:scheduled", { item: item.name, start_time, end_time, currentTime });
+      dbg("step:scheduled", { item: item.name, start_time, end_time, currentTime: activityStartMinutes });
 
-      withMeals.push({
+      const finalDuration = activityEndMinutes - activityStartMinutes;
+      
+      // Ensure coordinates are preserved (needed for map display)
+      const hasCoordinates = item.coordinates && typeof item.coordinates.lat === 'number' && typeof item.coordinates.lng === 'number';
+      const coordinatesObj = hasCoordinates 
+        ? item.coordinates 
+        : (item.lat && item.lng ? { lat: item.lat, lng: item.lng } : null);
+      
+      itineraryItems.push({
         ...item,
-        estimated_duration: duration,
+        coordinates: coordinatesObj || item.coordinates, // Preserve or create coordinates object
+        estimated_duration: finalDuration,
         start_time,
         end_time,
         travel_time_minutes: travelTime,
       });
 
-      ensureMealsInWindow();
+      // Update currentTime to activity end time for next activity
+      currentTime = activityEndMinutes;
+      
+      // Track meal suggestions
+      if (activityStartMinutes >= LUNCH_WINDOW.start && activityEndMinutes <= LUNCH_WINDOW.end + 60) {
+        mealSuggestions.lunch = true;
+      }
+      if (activityStartMinutes >= DINNER_WINDOW.start && activityEndMinutes <= DINNER_WINDOW.end + 60) {
+        mealSuggestions.dinner = true;
+      }
     }
-
-  // ---- Smart fail-safes: add appropriate meals based on time -------------
-  const hasLunch = hasMeal(withMeals, "lunch");
-  const hasDinner = hasMeal(withMeals, "dinner");
-  
-  // Smart meal insertion based on current time
-  if (!hasLunch && !hasDinner) {
-    // No meals at all - insert based on time
-    if (currentTime <= DINNER_WINDOW.start) {
-      // Before 17:30 - insert lunch
-      insertMealBlock(withMeals, "Lunch", currentTime, 60, "Added as fail-safe - no meals planned.");
-      currentTime += 60;
-    } else {
-      // After 17:30 - insert dinner
-      insertMealBlock(withMeals, "Dinner", currentTime, 60, "Added as fail-safe - no meals planned.");
-      currentTime += 60;
-    }
-  } else if (!hasLunch && currentTime <= DINNER_WINDOW.start) {
-    // Missing lunch and it's still lunch time
-    insertMealBlock(withMeals, "Lunch", currentTime, 60, "Added as fail-safe - missed lunch window.");
-    currentTime += 60;
-  } else if (!hasDinner && currentTime > LUNCH_WINDOW.end) {
-    // Missing dinner and it's past lunch time
-    insertMealBlock(withMeals, "Dinner", currentTime, 60, "Added as fail-safe - missed dinner window.");
-    currentTime += 60;
-  }
 
   dbg("post-loop summary", {
     finalCurrentTime: currentTime,
-    meals: withMeals.filter((x) => x.category === "meal").map((x) => x.name),
+    mealSuggestions,
+    totalActivities: itineraryItems.length,
   });
 
     // Re-number orders cleanly
-    const result = withMeals.map((item, idx) => ({
+    const result = itineraryItems.map((item, idx) => ({
       ...item,
       order: idx + 1,
     }));

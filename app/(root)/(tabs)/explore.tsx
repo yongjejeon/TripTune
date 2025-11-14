@@ -15,18 +15,7 @@ import {
     TouchableOpacity,
     View,
 } from "react-native";
-// import MapView, { Marker, Polyline } from 'react-native-maps';
-
-// Temporary fallback map component
-const MapView = ({ children, style, region, showsUserLocation, showsMyLocationButton, initialRegion }: any) => (
-  <View style={[style, { backgroundColor: '#e3f2fd', justifyContent: 'center', alignItems: 'center' }]}>
-    <Text style={{ color: '#1976d2', fontSize: 16, fontWeight: 'bold' }}>Map View</Text>
-    <Text style={{ color: '#666', fontSize: 12, marginTop: 4 }}>Interactive map will be available</Text>
-  </View>
-);
-
-const Marker = ({ coordinate, title, description, pinColor }: any) => null;
-const Polyline = ({ coordinates, strokeColor, strokeWidth, lineDashPattern }: any) => null;
+import MapView, { Marker, Polyline } from "react-native-maps";
 
 // ---------------- Utils ----------------
 function haversineMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
@@ -1308,16 +1297,59 @@ export default function Explore() {
                 </View>
               </View>
               
-              {tripPlan.days.map((d: any, dayIndex: number) => (
-                <View key={d.date} className="mb-8">
-                  <View className="bg-gray-100 p-3 rounded-lg mb-4">
-                    <Text className="text-xl font-rubik-bold text-gray-800">
-                      Day {dayIndex + 1}: {d.date}
-                    </Text>
-                    <Text className="text-sm text-gray-600">
-                      {d.itinerary.length} activities planned
-                    </Text>
-                  </View>
+              {tripPlan.days.map((d: any, dayIndex: number) => {
+                // Get map coordinates for this day
+                const dayMapCoordinates = getMapCoordinates(d.itinerary || []);
+                const dayMapRegion = getMapRegion(dayMapCoordinates, userLocation ?? undefined);
+                const routeCoordinates = dayMapCoordinates.map(coord => ({
+                  latitude: coord.latitude,
+                  longitude: coord.longitude,
+                }));
+                
+                return (
+                  <View key={d.date} className="mb-8">
+                    <View className="bg-gray-100 p-3 rounded-lg mb-4">
+                      <Text className="text-xl font-rubik-bold text-gray-800">
+                        Day {dayIndex + 1}: {d.date}
+                      </Text>
+                      <Text className="text-sm text-gray-600">
+                        {d.itinerary.length} activities planned
+                      </Text>
+                    </View>
+                    
+                    {/* Map showing all stops for this day */}
+                    {dayMapCoordinates.length > 0 && (
+                      <View className="mb-4 rounded-2xl overflow-hidden border border-gray-200 bg-white" style={{ height: 300 }}>
+                        <MapView
+                          style={{ flex: 1 }}
+                          initialRegion={dayMapRegion}
+                          region={dayMapRegion}
+                          showsUserLocation={false}
+                          showsMyLocationButton={false}
+                        >
+                          {/* Route polyline connecting all stops */}
+                          {routeCoordinates.length > 1 && (
+                            <Polyline
+                              coordinates={routeCoordinates}
+                              strokeColor="#0061ff"
+                              strokeWidth={3}
+                              lineDashPattern={[5, 5]}
+                            />
+                          )}
+                          
+                          {/* Markers for each stop */}
+                          {dayMapCoordinates.map((coord, idx) => (
+                            <Marker
+                              key={`${d.date}-${idx}-${coord.latitude}-${coord.longitude}`}
+                              coordinate={{ latitude: coord.latitude, longitude: coord.longitude }}
+                              title={`${idx + 1}. ${coord.title}`}
+                              description={coord.description}
+                              pinColor={idx === 0 ? "#00ff00" : idx === dayMapCoordinates.length - 1 ? "#ff0000" : "#0061ff"}
+                            />
+                          ))}
+                        </MapView>
+                      </View>
+                    )}
                   
                   {d.itinerary.length > 0 ? (
                     d.itinerary.map((item: any, idx: number) => (
@@ -1382,7 +1414,8 @@ export default function Explore() {
                     </View>
                   )}
                 </View>
-              ))}
+                );
+              })}
 
               {/* Replacement Suggestions Drawer */}
               {replaceContext && Array.isArray(replacementSuggestions) && (

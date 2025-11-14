@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { Text, TouchableOpacity, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Text, View } from "react-native";
 import { Calendar, DateData } from "react-native-calendars";
 
 export type DateISO = string; // "YYYY-MM-DD"
@@ -49,6 +49,7 @@ export default function CalendarRangePicker({
   const [endDate, setEndDate] = useState<DateISO | undefined>(initialEnd);
 
   const valid = !!startDate && !!endDate && startDate <= endDate;
+  const lastRangeKey = useRef<string | null>(null);
 
   const markedDates = useMemo(() => {
     if (!startDate) return {};
@@ -70,6 +71,15 @@ export default function CalendarRangePicker({
     return marked;
   }, [startDate, endDate]);
 
+  const todayKey = ymd(new Date());
+  const markedWithToday = useMemo(() => {
+    const base = { ...markedDates };
+    if (!base[todayKey]) {
+      base[todayKey] = { textColor: "#0061ff" };
+    }
+    return base;
+  }, [markedDates, todayKey]);
+
   const handleDayPress = (day: DateData) => {
     const date = day.dateString; // already "YYYY-MM-DD" in local
     // First tap or reset after complete range
@@ -89,14 +99,22 @@ export default function CalendarRangePicker({
 
   const days = valid ? buildDaysLocal(startDate!, endDate!) : [];
 
+  useEffect(() => {
+    if (!valid) return;
+    const key = `${startDate}|${endDate}`;
+    if (lastRangeKey.current === key) return;
+    lastRangeKey.current = key;
+    onConfirm({ startDate: startDate!, endDate: endDate!, days });
+  }, [valid, startDate, endDate, days, onConfirm]);
+
   return (
     <View>
-      <Text className="text-2xl font-rubik-bold mt-2 mb-2">Select Trip Dates</Text>
-      <Text className="text-gray-500 mb-4">Tap a start day, then an end day.</Text>
+      <Text className="text-2xl font-rubik-bold mt-2 mb-2 text-center">Select Trip Dates</Text>
+      <Text className="text-gray-500 mb-4 text-center">Tap a start day, then an end day.</Text>
 
       <Calendar
         onDayPress={handleDayPress}
-        markedDates={markedDates}
+        markedDates={markedWithToday}
         markingType="period"
         minDate={minDate}
         maxDate={maxDate}
@@ -107,25 +125,6 @@ export default function CalendarRangePicker({
           arrowColor: "#0061ff",
         }}
       />
-
-      <View className="mt-4 mb-2">
-        <Text className="font-rubik-semibold">Start: {startDate ?? "-"}</Text>
-        <Text className="font-rubik-semibold">End: {endDate ?? "-"}</Text>
-        <Text className="text-gray-600">Days selected: {days.length || 0}</Text>
-      </View>
-
-      <View className="flex-row justify-between mt-2">
-        <TouchableOpacity className="bg-gray-200 py-3 px-5 rounded" onPress={onCancel}>
-          <Text className="font-rubik-semibold">Back</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          className={`py-3 px-5 rounded ${valid ? "bg-primary-100" : "bg-gray-300"}`}
-          disabled={!valid}
-          onPress={() => onConfirm({ startDate: startDate!, endDate: endDate!, days })}
-        >
-          <Text className="text-white font-rubik-semibold">Next</Text>
-        </TouchableOpacity>
-      </View>
     </View>
   );
 }

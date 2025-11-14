@@ -302,38 +302,9 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
           continue;
         }
 
-        // Ensure we have enough activities for a full day
-        if (rawList.length < 4) {
-          console.warn(`Day ${date} has only ${rawList.length} activities, trying to add more...`);
-          
-          // Find additional places that haven't been used
-          const additionalPlaces = dayCandidates.filter(p => 
-            !rawList.some(item => item.place_id === p.place_id)
-          ).slice(0, 4 - rawList.length);
-          
-          if (additionalPlaces.length > 0) {
-            console.log(`Adding ${additionalPlaces.length} additional places to day ${date}:`, 
-              additionalPlaces.map(p => p.name));
-            additionalPlaces.forEach((place, index) => {
-              rawList.push({
-                order: rawList.length + index + 1,
-                place_id: place.place_id,
-                name: place.name,
-                category: place.normalizedCategory || place.category || "attraction",
-                lat: place.lat || place.geometry?.location?.lat || 0,
-                lng: place.lng || place.geometry?.location?.lng || 0,
-                start_time: "10:00",
-                end_time: "11:00",
-                estimated_duration: place.preferredDuration || 90,
-                travel_time_minutes: 0,
-                travel_instructions: "Walk ~5 min",
-                reason: "Added to complete day itinerary"
-              });
-            });
-          } else {
-            console.warn(`No additional places available for day ${date}`);
-          }
-        }
+        // Note: We don't force a specific number of activities here.
+        // Let the AI and later gap-filling logic determine the optimal number
+        // based on available time, opening hours, and place quality.
         
         // Mark all places used in this day's itinerary
         const dayUsedPlaces = new Set<string>();
@@ -369,7 +340,10 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
               place_id: fullPlace.place_id,
               photoUrl: fullPlace.photoUrl,
               rating: fullPlace.rating,
-              user_ratings_total: fullPlace.user_ratings_total
+              user_ratings_total: fullPlace.user_ratings_total,
+              willOpenAt: fullPlace.willOpenAt,
+              willCloseAt: fullPlace.willCloseAt,
+              todaysHoursText: fullPlace.todaysHoursText
             };
           }
           
@@ -379,10 +353,263 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
 
         const optimized = await reconstructItinerary(homebase, enrichedList, { startTime: itineraryStartTime });
 
-        // Build leftover pool for quick replacements (prioritized, unused for this day and globally)
+        // Helper functions
+        const timeToMinutes = (timeStr: string): number => {
+          const [h, m] = timeStr.split(":").map(Number);
+          return h * 60 + m;
+        };
+
+        const minutesToTime = (mins: number): string => {
+          const h = Math.floor(mins / 60);
+          const m = mins % 60;
+          return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+        };
+
+        const parseTimeToMinutes = (isoString: string | undefined): number | null => {
+          if (!isoString) return null;
+          try {
+            const date = new Date(isoString);
+            const hours = date.getUTCHours();
+            const mins = date.getUTCMinutes();
+            return hours * 60 + mins;
+          } catch {
+            return null;
+          }
+        };
+
+        // Dynamic gap-filling and activity optimization
+        const startTimeMinutes = timeToMinutes(itineraryStartTime || "10:00");
+        const endTimeMinutes = 20 * 60; // Assume day ends around 8 PM (can be made configurable)
+        const dayDurationMinutes = endTimeMinutes - startTimeMinutes;
+        
+        // Calculate how much time is actually filled by current activities
+        let totalScheduledTime = 0;
+        if (optimized.length > 0) {
+          const firstActivity = optimized[0];
+          const lastActivity = optimized[optimized.length - 1];
+          const firstStart = timeToMinutes(firstActivity.start_time);
+          const lastEnd = timeToMinutes(lastActivity.end_time);
+          totalScheduledTime = lastEnd - firstStart;
+        }
+        
+        // Calculate gaps in the schedule
         const optimizedIds = new Set<string>(optimized.map((it: any) => it.place_id).filter(Boolean));
+        
+        if (optimized.length > 0) {
+          const firstActivity = optimized[0];
+          const firstStartMinutes = timeToMinutes(firstActivity.start_time);
+          
+          // Check if first activity was delayed due to opening hours
+          const firstPlace = places.find(p => p.place_id === firstActivity.place_id);
+          const openingMinutes = firstPlace?.willOpenAt ? parseTimeToMinutes(firstPlace.willOpenAt) : null;
+          
+          // Calculate gap before first activity
+          const gapBeforeFirst = firstStartMinutes - startTimeMinutes;
+          
+          // If there's a significant gap before first activity AND it's due to late opening hours
+          // Dynamic threshold: at least 2.5 hours (150 min) and the activity was delayed by opening hours
+          if (gapBeforeFirst >= 150 && openingMinutes && firstStartMinutes >= openingMinutes) {
+            console.log(`Detected ${Math.round(gapBeforeFirst / 60)} hour gap before "${firstActivity.name}" (opens at ${minutesToTime(openingMinutes)})`);
+            
+            // Calculate how many activities can fit in this gap (assuming 90 min avg + 30 min travel per activity)
+            const avgActivityTime = 90; // minutes
+            const avgTravelTime = 30; // minutes
+            const activitiesPerGap = Math.floor(gapBeforeFirst / (avgActivityTime + avgTravelTime));
+            const maxActivitiesToAdd = Math.min(activitiesPerGap, 3); // Cap at 3 to avoid overcrowding
+            
+            // Find unused places that can fill this gap (prioritized by score)
+            // Filter to only include places with valid coordinates
+            const candidatesForGap = availablePlaces
+              .filter(p => {
+                if (optimizedIds.has(p.place_id) || used.has(p.place_id)) return false;
+                
+                // Verify place has valid coordinates in the original places array
+                const fullPlace = places.find(pl => pl.place_id === p.place_id);
+                const hasValidCoords = fullPlace && 
+                  ((fullPlace.lat !== null && fullPlace.lat !== undefined && fullPlace.lat !== 0) ||
+                   (fullPlace.geometry?.location?.lat !== null && fullPlace.geometry?.location?.lat !== undefined));
+                
+                if (!hasValidCoords) {
+                  console.warn(`Skipping "${p.name}" for gap-filling - no valid coordinates available`);
+                  return false;
+                }
+                
+                // Check if place can start early (either no opening time or opens early enough)
+                const placeOpeningTime = p.willOpenAt ? parseTimeToMinutes(p.willOpenAt) : null;
+                if (placeOpeningTime === null) return true; // No opening time = can start anytime
+                // Place should open at or before the gap starts (with 30 min buffer)
+                return placeOpeningTime <= startTimeMinutes + 30;
+              })
+              .slice()
+              .sort((a, b) => {
+                // Prioritize by: preference score > aiPriority > base score
+                const scoreA = (a._prefScore ?? 0) * 1000 + (a.aiPriority ?? 0) * 10 + (a.score ?? 0);
+                const scoreB = (b._prefScore ?? 0) * 1000 + (b.aiPriority ?? 0) * 10 + (b.score ?? 0);
+                return scoreB - scoreA;
+              })
+              .slice(0, maxActivitiesToAdd);
+            
+            if (candidatesForGap.length > 0) {
+              console.log(`Adding ${candidatesForGap.length} activity(ies) to fill gap before "${firstActivity.name}":`, 
+                candidatesForGap.map(p => p.name));
+              
+              // Add these places to the beginning of enrichedList for reconstruction
+              // Re-query the full place objects from the places array to ensure we have complete data
+              candidatesForGap.forEach(place => {
+                // Find the full place object from the original places array to ensure we have all data
+                // This ensures we get coordinates even if the filtered place object is missing them
+                const fullPlace = places.find(p => p.place_id === place.place_id) || place;
+                
+                // Extract coordinates with multiple fallbacks - use nullish coalescing to avoid 0 defaults
+                const lat = fullPlace.lat ?? fullPlace.geometry?.location?.lat ?? null;
+                const lng = fullPlace.lng ?? fullPlace.geometry?.location?.lng ?? null;
+                
+                // Validate coordinates before adding
+                if (lat === null || lng === null || lat === 0 || lng === 0) {
+                  console.error(`Cannot add "${fullPlace.name}" - invalid coordinates: lat=${lat}, lng=${lng}`);
+                  return; // Skip this place if we don't have valid coordinates
+                }
+                
+                const newItem = {
+                  order: enrichedList.length + 1,
+                  place_id: fullPlace.place_id,
+                  name: fullPlace.name,
+                  category: fullPlace.normalizedCategory || fullPlace.category || "attraction",
+                  lat: lat,
+                  lng: lng,
+                  coordinates: { lat, lng }, // Add coordinates object for map display
+                  start_time: minutesToTime(startTimeMinutes),
+                  end_time: minutesToTime(startTimeMinutes + 90),
+                  estimated_duration: fullPlace.preferredDuration || 90,
+                  travel_time_minutes: 0,
+                  travel_instructions: "Walk ~5 min",
+                  reason: `Added to fill morning gap before "${firstActivity.name}"`,
+                  willOpenAt: fullPlace.willOpenAt,
+                  willCloseAt: fullPlace.willCloseAt,
+                  todaysHoursText: fullPlace.todaysHoursText,
+                  photoUrl: fullPlace.photoUrl || fullPlace.photoRef,
+                  rating: fullPlace.rating,
+                  user_ratings_total: fullPlace.user_ratings_total
+                };
+                
+                // Insert at the beginning, but after anchor if present
+                const anchorIndex = enrichedList.findIndex((item: any) => item.place_id && anchorIds.includes(item.place_id));
+                if (anchorIndex >= 0) {
+                  enrichedList.splice(anchorIndex, 0, newItem);
+                } else {
+                  enrichedList.unshift(newItem);
+                }
+              });
+              
+              // Reconstruct itinerary with the added activities
+              const reoptimized = await reconstructItinerary(homebase, enrichedList, { startTime: itineraryStartTime });
+              optimized.length = 0;
+              optimized.push(...reoptimized);
+            }
+          }
+        }
+
+        // Check if the day is under-utilized (after gap-filling above)
+        // Calculate utilization: scheduled time vs available time
+        const utilizationRatio = totalScheduledTime / dayDurationMinutes;
+        const minUtilizationRatio = 0.5; // At least 50% of the day should be utilized
+        
+        // Also check if there are significant gaps between activities that could be filled
+        let hasLargeGaps = false;
+        if (optimized.length > 1) {
+          for (let i = 1; i < optimized.length; i++) {
+            const prevEnd = timeToMinutes(optimized[i - 1].end_time);
+            const currStart = timeToMinutes(optimized[i].start_time);
+            const gap = currStart - prevEnd;
+            // If there's a gap of 3+ hours between activities, we can fill it
+            if (gap >= 180) {
+              hasLargeGaps = true;
+              break;
+            }
+          }
+        }
+        
+        // If day is under-utilized OR has large gaps, try to add more high-quality activities
+        if (utilizationRatio < minUtilizationRatio || hasLargeGaps || optimized.length < 2) {
+          const finalOptimizedIds = new Set<string>(optimized.map((it: any) => it.place_id).filter(Boolean));
+          const remainingTime = dayDurationMinutes - totalScheduledTime;
+          
+          // Calculate how many more activities could fit (with travel time)
+          const avgActivityTime = 90;
+          const avgTravelTime = 30;
+          const possibleAdditionalActivities = Math.floor(remainingTime / (avgActivityTime + avgTravelTime));
+          const targetAdditionalActivities = Math.min(possibleAdditionalActivities, 2); // Max 2 more to maintain quality
+          
+          if (targetAdditionalActivities > 0) {
+            const gapFillCandidates = availablePlaces
+              .filter(p => {
+                if (finalOptimizedIds.has(p.place_id) || used.has(p.place_id)) return false;
+                // Only add places that are actually high quality (prioritized by score)
+                const placeScore = (p._prefScore ?? 0) * 1000 + (p.aiPriority ?? 0) * 10 + (p.score ?? 0);
+                return placeScore > 50; // Only add places with decent scores
+              })
+              .slice()
+              .sort((a, b) => {
+                // Prioritize by: preference score > aiPriority > base score
+                const scoreA = (a._prefScore ?? 0) * 1000 + (a.aiPriority ?? 0) * 10 + (a.score ?? 0);
+                const scoreB = (b._prefScore ?? 0) * 1000 + (b.aiPriority ?? 0) * 10 + (b.score ?? 0);
+                return scoreB - scoreA;
+              })
+              .slice(0, targetAdditionalActivities);
+            
+            if (gapFillCandidates.length > 0) {
+              console.log(`Day has ${optimized.length} activities (${Math.round(utilizationRatio * 100)}% utilization), adding ${gapFillCandidates.length} more high-quality activities:`, 
+                gapFillCandidates.map(p => p.name));
+              
+              // Add to enrichedList and reconstruct
+              // Re-query the full place objects from the places array to ensure we have complete data
+              gapFillCandidates.forEach(place => {
+                // Find the full place object from the original places array to ensure we have all data
+                const fullPlace = places.find(p => p.place_id === place.place_id) || place;
+                
+                // Extract coordinates with multiple fallbacks
+                const lat = fullPlace.lat ?? fullPlace.geometry?.location?.lat ?? null;
+                const lng = fullPlace.lng ?? fullPlace.geometry?.location?.lng ?? null;
+                
+                if (lat === null || lng === null || lat === 0 || lng === 0) {
+                  console.error(`Cannot add "${fullPlace.name}" - invalid coordinates: lat=${lat}, lng=${lng}`);
+                  return; // Skip this place if we don't have valid coordinates
+                }
+                
+                enrichedList.push({
+                  order: enrichedList.length + 1,
+                  place_id: fullPlace.place_id,
+                  name: fullPlace.name,
+                  category: fullPlace.normalizedCategory || fullPlace.category || "attraction",
+                  lat: lat,
+                  lng: lng,
+                  coordinates: { lat, lng }, // Add coordinates object for map display
+                  start_time: minutesToTime(startTimeMinutes + Math.floor(totalScheduledTime / 2)), // Place in middle of day
+                  end_time: minutesToTime(startTimeMinutes + Math.floor(totalScheduledTime / 2) + 90),
+                  estimated_duration: fullPlace.preferredDuration || 90,
+                  travel_time_minutes: 0,
+                  travel_instructions: "Walk ~5 min",
+                  reason: "Added to optimize day utilization",
+                  willOpenAt: fullPlace.willOpenAt,
+                  willCloseAt: fullPlace.willCloseAt,
+                  todaysHoursText: fullPlace.todaysHoursText,
+                  photoUrl: fullPlace.photoUrl || fullPlace.photoRef,
+                  rating: fullPlace.rating,
+                  user_ratings_total: fullPlace.user_ratings_total
+                });
+              });
+              
+              const reoptimized = await reconstructItinerary(homebase, enrichedList, { startTime: itineraryStartTime });
+              optimized.length = 0;
+              optimized.push(...reoptimized);
+            }
+          }
+        }
+
+        // Build leftover pool for quick replacements (prioritized, unused for this day and globally)
+        const finalOptimizedIds = new Set<string>(optimized.map((it: any) => it.place_id).filter(Boolean));
         const dayLeftover = availablePlaces
-          .filter(p => !optimizedIds.has(p.place_id) && !used.has(p.place_id))
+          .filter(p => !finalOptimizedIds.has(p.place_id) && !used.has(p.place_id))
           .slice() // copy
           .sort((a, b) => (b._prefScore ?? b.score ?? 0) - (a._prefScore ?? a.score ?? 0));
 

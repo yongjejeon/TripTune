@@ -130,10 +130,10 @@ ${JSON.stringify(compactList, null, 2)}
        9) For travel between stops, provide:
           - "travel_time_minutes": integer minutes
           - "travel_instructions": just mode+time (e.g., "Walk ~10 min", "Taxi ~15-20 min", "Bus/Metro ~18-25 min; check Google Maps"). Do NOT invent route numbers.
-       10) Include fixed Lunch and Dinner blocks (category "meal", 60-90 min each) at reasonable times.
+       10) Do NOT include meal blocks. Instead, add meal suggestions in the "reason" field for activities that overlap with lunch (12:00-14:00) or dinner (18:00-20:00) windows, e.g., "💡 Lunch suggestion: Consider dining at [place name] around 12:30 or at a nearby restaurant during this visit."
        11) Use integer minutes for "estimated_duration".
        12) Start around 09:00 local time and end by early evening unless hours force changes.
-       13) IMPORTANT: You must create a complete day itinerary with 5-6 activities plus meals. Do not create incomplete itineraries.
+       13) IMPORTANT: Create a realistic day itinerary with 3-4 activities (not 5-6). Focus on quality over quantity. Do not create incomplete or overly packed itineraries.
 
 Output JSON ONLY with this schema:
 
