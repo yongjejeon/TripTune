@@ -20,6 +20,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import LocationMapPicker from "@/lib/components/LocationMapPicker";
+import { GooglePlacesAutocomplete } from "react-native-google-places-autocomplete";
 
 const PERF = true;
 const t = (label: string) => PERF && console.time(label);
@@ -28,6 +29,23 @@ const tend = (label: string) => PERF && console.timeEnd(label);
 const TIME_24H_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const START_TIME_OPTIONS = ["08:00", "09:00", "10:00", "11:00"];
 
+const formatGeocodedAddress = (address: Location.LocationGeocodedAddress | undefined | null) => {
+  if (!address) return "";
+  const streetLine = [address.name, address.streetNumber, address.street]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  const locality = address.city || address.subregion || address.district || address.region;
+  const country = address.country;
+
+  const parts = [streetLine, locality, country]
+    .map((part) => (part || "").trim())
+    .filter((part, index, arr) => part.length > 0 && arr.indexOf(part) === index);
+
+  return parts.join(", ") || locality || streetLine || country || "";
+};
+
 export default function Index() {
   const router = useRouter();
   const [city, setCity] = useState("");
@@ -35,6 +53,9 @@ export default function Index() {
   const [loading, setLoading] = useState(false);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [mapRefining, setMapRefining] = useState(false);
+  const [manualLookupLoading, setManualLookupLoading] = useState(false);
+
+  const placesApiKey = process.env.EXPO_PUBLIC_GOOGLE_API_KEY ?? "";
 
   const [itineraryStart, setItineraryStart] = useState<string>("09:00");
 
@@ -339,9 +360,12 @@ export default function Index() {
       }
 
       const address = data[0];
-      if (address.city) {
+      const formatted = formatGeocodedAddress(address);
+      if (formatted) {
+        setCity(formatted);
+      } else if (address?.city) {
         setCity(address.city);
-      } else if (address.region) {
+      } else if (address?.region) {
         setCity(address.region);
       }
 
@@ -527,6 +551,15 @@ export default function Index() {
         const { latitude, longitude } = results[0];
         const next = { lat: latitude, lng: longitude };
         setCoords(next);
+        try {
+          const reverse = await Location.reverseGeocodeAsync({ latitude, longitude });
+          const formatted = formatGeocodedAddress(reverse?.[0]);
+          if (formatted) {
+            setCity(formatted);
+          }
+        } catch (error) {
+          console.warn("Reverse geocode failed while resolving", error);
+        }
         return next;
       }
     } catch (e) {
@@ -546,11 +579,9 @@ export default function Index() {
     try {
       const result = await Location.reverseGeocodeAsync({ latitude: next.lat, longitude: next.lng });
       const address = result?.[0];
-      if (address) {
-        const label = address.city || address.district || address.subregion || address.region;
-        if (label) {
-          setCity(label);
-        }
+      const formatted = formatGeocodedAddress(address);
+      if (formatted) {
+        setCity(formatted);
       }
     } catch (error) {
       console.warn("Map selection reverse geocode failed", error);
@@ -558,6 +589,38 @@ export default function Index() {
       setMapRefining(false);
     }
   }, [coords, setCity]);
+
+  const handleManualAddressLookup = useCallback(async () => {
+    const input = (city || "").trim();
+    if (!input) {
+      Alert.alert("Enter address", "Please type a city or hotel address first.");
+      return;
+    }
+
+    setManualLookupLoading(true);
+    try {
+      const geocodeResults = await Location.geocodeAsync(input);
+      if (!geocodeResults || !geocodeResults.length) {
+        Alert.alert("Address not found", "We couldn't locate that address. Try refining your search or use the map.");
+        return;
+      }
+
+      const { latitude, longitude } = geocodeResults[0];
+      const next = { lat: latitude, lng: longitude };
+      setCoords(next);
+
+      const reverse = await Location.reverseGeocodeAsync({ latitude, longitude });
+      const formatted = formatGeocodedAddress(reverse?.[0]);
+      if (formatted) {
+        setCity(formatted);
+      }
+    } catch (error) {
+      console.error("Manual location lookup failed", error);
+      Alert.alert("Lookup failed", "Something went wrong while finding that address. Please try again.");
+    } finally {
+      setManualLookupLoading(false);
+    }
+  }, [city]);
 
   // ------- UI -------
   return (
@@ -797,14 +860,7 @@ export default function Index() {
             <Text className="text-gray-600 mb-6">
               Set your accommodation location. We will plan around this home base.
             </Text>
-
-            <View className="bg-blue-50 p-6 rounded-xl border border-blue-200 mb-6">
-              <Text className="text-blue-800 font-rubik-semibold mb-2">Choose how to set your home base</Text>
-              <Text className="text-blue-700 text-sm">
-                Use your current GPS position, tap the map to drop a pin at your hotel, or enter the city manually.
-              </Text>
-            </View>
-
+ 
             {detecting ? (
               <View className="items-center py-8">
                 <View className="h-3 bg-gray-200 rounded-full overflow-hidden">
@@ -816,7 +872,13 @@ export default function Index() {
                 <Text className="text-gray-600 mt-4">Detecting your location...</Text>
               </View>
             ) : null}
-
+ 
+            {placesApiKey ? (
+              <View className="mb-4">
+                <Text className="font-rubik-semibold text-gray-700 mb-2">Search hotel or address</Text>
+              </View>
+            ) : null}
+ 
             {/* Option A: Use current location */}
             <TouchableOpacity
               onPress={detectLocation}
@@ -824,16 +886,7 @@ export default function Index() {
             >
               <Text className="text-white text-center font-rubik-bold text-lg">Use My Current Location</Text>
             </TouchableOpacity>
-
-            {coords && (
-              <View className="bg-green-50 p-4 rounded-xl border border-green-200 mb-6">
-                <Text className="text-green-800 font-rubik-semibold">Location Set</Text>
-                <Text className="text-green-700 text-sm mt-1">
-                  Coordinates saved. You can also enter a city below to override.
-                </Text>
-              </View>
-            )}
-
+ 
             <View className="mb-6">
               <Text className="font-rubik-semibold text-gray-700 mb-3">Fine-tune on the map</Text>
               <LocationMapPicker value={coords} onChange={handleMapCoordinateChange} />
@@ -850,6 +903,15 @@ export default function Index() {
               )}
             </View>
 
+            {city ? (
+              <View className="mb-6 border border-primary-100 rounded-xl p-4 bg-primary-50/40">
+                <Text className="text-primary-900 font-rubik-semibold mb-1">Selected home base</Text>
+                <Text className="text-primary-900 text-sm" numberOfLines={3}>
+                  {city}
+                </Text>
+              </View>
+            ) : null}
+ 
             {/* Option B: Enter city manually */}
             <View className="mb-6">
               <Text className="font-rubik-semibold mb-2 text-gray-700">Enter city (hotel)</Text>
@@ -860,8 +922,22 @@ export default function Index() {
                 className="border border-gray-300 rounded-xl px-4 py-4 text-lg"
               />
               <Text className="text-xs text-gray-500 mt-2">We'll use this as your home base.</Text>
+              <TouchableOpacity
+                onPress={handleManualAddressLookup}
+                disabled={manualLookupLoading}
+                className="mt-3 py-3 px-4 rounded-xl border border-gray-300 bg-white"
+              >
+                {manualLookupLoading ? (
+                  <View className="flex-row items-center justify-center gap-2">
+                    <ActivityIndicator size="small" color="#0061ff" />
+                    <Text className="text-gray-700 font-rubik-medium">Looking up address...</Text>
+                  </View>
+                ) : (
+                  <Text className="text-center font-rubik-semibold text-gray-700">Find this address</Text>
+                )}
+              </TouchableOpacity>
             </View>
-
+ 
             <View className="flex-row gap-4">
               <TouchableOpacity
                 onPress={() => setOnboardStep(2)}
@@ -881,9 +957,12 @@ export default function Index() {
                   }
                   setOnboardStep(4);
                 }}
-                className="flex-1 bg-primary-100 py-4 px-6 rounded-xl"
+                className={`flex-1 py-4 px-6 rounded-xl ${coords ? "bg-primary-100" : "bg-gray-300"}`}
+                disabled={!coords}
               >
-                <Text className="text-white text-center font-rubik-bold">Continue</Text>
+                <Text className={`text-center font-rubik-bold ${coords ? "text-white" : "text-gray-500"}`}>
+                  Continue
+                </Text>
               </TouchableOpacity>
             </View>
           </View>

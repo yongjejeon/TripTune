@@ -1,3 +1,4 @@
+import "react-native-get-random-values";
 import { GlobalProvider } from "@/lib/global-provider";
 import { useFonts } from "expo-font";
 import { SplashScreen, Stack } from "expo-router";
