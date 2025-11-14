@@ -4,7 +4,7 @@ import { fetchPlacesByCoordinates, FetchProgressUpdate } from "@/lib/google";
 import { inferPreferencesFromSelections } from "@/lib/preferences";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
@@ -19,6 +19,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import LocationMapPicker from "@/lib/components/LocationMapPicker";
 
 const PERF = true;
 const t = (label: string) => PERF && console.time(label);
@@ -33,6 +34,7 @@ export default function Index() {
   const [places, setPlaces] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [mapRefining, setMapRefining] = useState(false);
 
   const [itineraryStart, setItineraryStart] = useState<string>("09:00");
 
@@ -533,6 +535,30 @@ export default function Index() {
     return null;
   }
 
+  const handleMapCoordinateChange = useCallback(async (next: { lat: number; lng: number }) => {
+    if (!next) return;
+    const hasExisting = coords ? Math.abs(coords.lat - next.lat) < 0.00001 && Math.abs(coords.lng - next.lng) < 0.00001 : false;
+    setCoords(next);
+    if (hasExisting) {
+      return;
+    }
+    setMapRefining(true);
+    try {
+      const result = await Location.reverseGeocodeAsync({ latitude: next.lat, longitude: next.lng });
+      const address = result?.[0];
+      if (address) {
+        const label = address.city || address.district || address.subregion || address.region;
+        if (label) {
+          setCity(label);
+        }
+      }
+    } catch (error) {
+      console.warn("Map selection reverse geocode failed", error);
+    } finally {
+      setMapRefining(false);
+    }
+  }, [coords, setCity]);
+
   // ------- UI -------
   return (
     <SafeAreaView className="h-full bg-white">
@@ -775,7 +801,7 @@ export default function Index() {
             <View className="bg-blue-50 p-6 rounded-xl border border-blue-200 mb-6">
               <Text className="text-blue-800 font-rubik-semibold mb-2">Choose how to set your home base</Text>
               <Text className="text-blue-700 text-sm">
-                Use your current GPS position or enter the city of your hotel.
+                Use your current GPS position, tap the map to drop a pin at your hotel, or enter the city manually.
               </Text>
             </View>
 
@@ -807,6 +833,22 @@ export default function Index() {
                 </Text>
               </View>
             )}
+
+            <View className="mb-6">
+              <Text className="font-rubik-semibold text-gray-700 mb-3">Fine-tune on the map</Text>
+              <LocationMapPicker value={coords} onChange={handleMapCoordinateChange} />
+              <View className="flex-row justify-between items-center mt-3">
+                <Text className="text-xs text-gray-500">Tap to drop a pin or drag the marker to your hotel.</Text>
+                {coords && (
+                  <Text className="text-xs font-rubik-semibold text-gray-600">
+                    {coords.lat.toFixed(4)}, {coords.lng.toFixed(4)}
+                  </Text>
+                )}
+              </View>
+              {mapRefining && (
+                <Text className="text-xs text-gray-500 mt-2">Updating nearby address...</Text>
+              )}
+            </View>
 
             {/* Option B: Enter city manually */}
             <View className="mb-6">
