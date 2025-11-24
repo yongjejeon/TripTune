@@ -6,7 +6,8 @@ const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_API_KEY!;
 
 export const getTravelTime = async (
   origin: { lat: number; lng: number },
-  destination: { lat: number; lng: number }
+  destination: { lat: number; lng: number },
+  mode: "transit" | "driving" = "transit"
 ) => {
   try {
     const res = await axios.get(
@@ -15,7 +16,7 @@ export const getTravelTime = async (
         params: {
           origin: `${origin.lat},${origin.lng}`,
           destination: `${destination.lat},${destination.lng}`,
-          mode: "transit",
+          mode: mode,
           key: API_KEY,
         },
       }
@@ -32,7 +33,7 @@ export const getTravelTime = async (
       return { duration: Infinity, instructions: "No route found" };
     }
 
-    // Build detailed instructions including bus/subway info
+    // Build detailed instructions based on travel mode
     const steps = leg.steps.map((s: any) => {
       if (s.travel_mode === "TRANSIT" && s.transit_details) {
         const td = s.transit_details;
@@ -41,16 +42,25 @@ export const getTravelTime = async (
         const shortName = line.short_name || line.name;
 
         return `${vehicle} ${shortName} from ${td.departure_stop.name} -> ${td.arrival_stop.name}`;
+      } else if (s.travel_mode === "DRIVING") {
+        // Driving instructions (strip HTML tags)
+        return s.html_instructions.replace(/<[^>]+>/g, "");
       } else {
-        // walking instructions (strip HTML tags)
+        // Walking instructions (strip HTML tags)
         return s.html_instructions.replace(/<[^>]+>/g, "");
       }
     });
 
+    // Format instructions based on mode
+    let formattedInstructions = steps.join(" -> ");
+    if (mode === "driving") {
+      formattedInstructions = `Drive ${leg.duration.text} via ${steps.slice(0, 2).join(" -> ")}${steps.length > 2 ? "..." : ""}`;
+    }
+
     return {
         duration: leg.duration.value, // seconds
         durationText: leg.duration.text, // "21 mins"
-        instructions: steps.join(" -> "),
+        instructions: formattedInstructions,
     };
   } catch (err) {
     console.error("Error fetching directions:", err);
@@ -62,7 +72,8 @@ export const getTravelTime = async (
 // Build graph for all places (excluding meals)
 export const buildTravelGraph = async (
   userCoords: { lat: number; lng: number },
-  places: any[]
+  places: any[],
+  mode: "transit" | "driving" = "transit"
 ) => {
   try {
     console.log("Building travel graph for", places.length, "places");
@@ -86,7 +97,7 @@ export const buildTravelGraph = async (
         if (i === j) continue;
 
         try {
-          const { duration, instructions } = await getTravelTime(limitedNodes[i], limitedNodes[j]);
+          const { duration, instructions } = await getTravelTime(limitedNodes[i], limitedNodes[j], mode);
           const targetName = limitedNodes[j].name || `Place_${j}`;
           
           graph[nodeName][targetName] = {

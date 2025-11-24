@@ -42,7 +42,7 @@ export const WEATHER_SENSITIVE_ACTIVITIES = {
 } as const;
 
 /**
- * Enhanced weather API call with more detailed data
+ * Enhanced weather API call with more detailed data (current weather)
  */
 export async function getDetailedWeather(lat: number, lon: number): Promise<WeatherData | null> {
   try {
@@ -75,6 +75,87 @@ export async function getDetailedWeather(lat: number, lon: number): Promise<Weat
     console.error('Failed to fetch detailed weather:', error);
     return null;
   }
+}
+
+/**
+ * Get weather forecast for a specific date (for itinerary planning)
+ * Returns forecast weather or null if unavailable (assume sunny)
+ */
+export async function getWeatherForecastForDate(
+  lat: number,
+  lon: number,
+  date: string // ISO date string like "2025-11-24"
+): Promise<WeatherData | null> {
+  try {
+    const API_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_KEY;
+    if (!API_KEY) {
+      console.error('OpenWeather API key not found');
+      return null;
+    }
+
+    const targetDate = new Date(date);
+    const now = new Date();
+    const daysDifference = Math.ceil((targetDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+    // OpenWeather forecast is available for up to 5 days
+    if (daysDifference < 0 || daysDifference > 5) {
+      console.log(`Weather forecast unavailable for date ${date} (${daysDifference} days away), assuming sunny`);
+      return null; // Will default to sunny weather
+    }
+
+    const response = await fetch(
+      `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${API_KEY}&units=metric`
+    );
+    
+    if (!response.ok) {
+      console.warn(`Weather forecast API error: ${response.status}, assuming sunny`);
+      return null;
+    }
+
+    const data = await response.json();
+    
+    // Find the forecast closest to noon on the target date
+    const targetNoon = new Date(targetDate);
+    targetNoon.setHours(12, 0, 0, 0);
+    
+    let closestForecast = null;
+    let smallestDiff = Infinity;
+    
+    for (const item of data.list || []) {
+      const forecastTime = new Date(item.dt * 1000);
+      const diff = Math.abs(forecastTime.getTime() - targetNoon.getTime());
+      
+      if (diff < smallestDiff) {
+        smallestDiff = diff;
+        closestForecast = item;
+      }
+    }
+    
+    if (closestForecast) {
+      return {
+        condition: closestForecast.weather[0]?.main || 'Clear',
+        temperature: Math.round(closestForecast.main?.temp || 20),
+        humidity: closestForecast.main?.humidity || 0,
+        windSpeed: closestForecast.wind?.speed || 0,
+        description: closestForecast.weather[0]?.description || '',
+        icon: closestForecast.weather[0]?.icon || '',
+        timestamp: new Date(closestForecast.dt * 1000).toISOString(),
+      };
+    }
+    
+    return null; // Will default to sunny
+  } catch (error) {
+    console.error('Failed to fetch weather forecast:', error);
+    return null; // Will default to sunny
+  }
+}
+
+/**
+ * Check if weather condition indicates rain
+ */
+export function isRaining(weather: WeatherData | null): boolean {
+  if (!weather) return false;
+  return BAD_WEATHER.includes(weather.condition);
 }
 
 /**
@@ -164,76 +245,74 @@ export async function findIndoorAlternatives(
 }
 
 /**
- * Adapt itinerary based on current weather
+ * Check for outdoor activities that need weather adaptation
+ * Returns the first outdoor activity that needs replacement (current or upcoming)
+ */
+export async function checkWeatherForOutdoorActivities(
+  itinerary: any[],
+  userLocation: { lat: number; lng: number },
+  currentActivityIndex: number = 0
+): Promise<{
+  needsAdaptation: boolean;
+  activity: any | null;
+  activityIndex: number;
+  alternatives: any[];
+  weather: WeatherData | null;
+} | null> {
+  try {
+    const weather = await getDetailedWeather(userLocation.lat, userLocation.lng);
+    if (!weather) {
+      return null;
+    }
+
+    // Check if it's raining
+    if (!isRaining(weather)) {
+      return null;
+    }
+
+    // Only check remaining/current activities (not completed ones)
+    for (let i = currentActivityIndex; i < itinerary.length; i++) {
+      const activity = itinerary[i];
+      const assessment = assessWeatherImpact(weather, activity);
+      
+      if (assessment.shouldAdapt) {
+        console.log(`Rain detected, found outdoor activity that needs adaptation: ${activity.name}`);
+        
+        // Find indoor alternatives (get 3)
+        const alternatives = await findIndoorAlternatives(activity, userLocation);
+        
+        if (alternatives.length > 0) {
+          return {
+            needsAdaptation: true,
+            activity,
+            activityIndex: i,
+            alternatives: alternatives.slice(0, 3), // Return exactly 3
+            weather,
+          };
+        }
+      }
+    }
+    
+    return null;
+    
+  } catch (error) {
+    console.error('Failed to check weather for outdoor activities:', error);
+    return null;
+  }
+}
+
+/**
+ * Adapt itinerary based on current weather (legacy function - kept for compatibility)
+ * Note: This should not auto-replace, but the new checkWeatherForOutdoorActivities should be used instead
  */
 export async function adaptItineraryForWeather(
   itinerary: any[],
   userLocation: { lat: number; lng: number },
   currentActivityIndex: number = 0
 ): Promise<{ adaptedItinerary: any[]; changes: string[] }> {
-  try {
-    console.log('Adapting itinerary for weather...');
-    
-    const weather = await getDetailedWeather(userLocation.lat, userLocation.lng);
-    if (!weather) {
-      console.warn('Could not fetch weather data, skipping adaptation');
-      return { adaptedItinerary: itinerary, changes: [] };
-    }
-
-    console.log(`Current weather: ${weather.condition} (${weather.temperature} C)`);
-    
-    const changes: string[] = [];
-    const adaptedItinerary = [...itinerary];
-    
-    // Only adapt future activities (not completed ones)
-    for (let i = currentActivityIndex; i < adaptedItinerary.length; i++) {
-      const activity = adaptedItinerary[i];
-      const assessment = assessWeatherImpact(weather, activity);
-      
-      if (assessment.shouldAdapt) {
-        console.log(`Adapting activity: ${activity.name}`);
-        
-        // Find indoor alternatives
-        const alternatives = await findIndoorAlternatives(activity, userLocation);
-        
-        if (alternatives.length > 0) {
-          const bestAlternative = alternatives[0];
-          
-          // Replace the outdoor activity with indoor alternative
-          adaptedItinerary[i] = {
-            ...bestAlternative,
-            originalActivity: activity.name,
-            adaptationReason: assessment.reason,
-            start_time: activity.start_time,
-            end_time: activity.end_time,
-            estimated_duration: activity.estimated_duration,
-            travel_time_minutes: activity.travel_time_minutes,
-            travel_instructions: activity.travel_instructions,
-          };
-          
-          changes.push(`Replaced "${activity.name}" with "${bestAlternative.name}" due to ${weather.condition}`);
-        } else {
-          // If no alternatives found, add a note
-          adaptedItinerary[i] = {
-            ...activity,
-            weatherWarning: `Outdoor activity - ${weather.condition} expected`,
-            adaptationReason: 'No suitable indoor alternatives found',
-          };
-          
-          changes.push(`Added weather warning for "${activity.name}"`);
-        }
-      }
-    }
-    
-    // Save weather data for fatigue calculations
-    await saveWeatherContext(weather, userLocation);
-    
-    return { adaptedItinerary, changes };
-    
-  } catch (error) {
-    console.error('Failed to adapt itinerary for weather:', error);
-    return { adaptedItinerary: itinerary, changes: [] };
-  }
+  // This function is deprecated - use checkWeatherForOutdoorActivities instead
+  // Keeping it for backward compatibility but it should not auto-replace
+  return { adaptedItinerary: itinerary, changes: [] };
 }
 
 /**

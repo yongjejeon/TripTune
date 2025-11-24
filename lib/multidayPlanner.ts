@@ -125,7 +125,7 @@ export async function planMultiDayTrip(options?: {
       options?.onStatus?.({ stage, message, progress, detail });
     };
 
-    emit("init", "Reading trip setup...", 0.02);
+    emit("init", "Reading trip setup...", 0);
 
     // 1) read context
     const rawCtx = await AsyncStorage.getItem("tripContext");
@@ -138,7 +138,7 @@ export async function planMultiDayTrip(options?: {
     const endDate: string = ctx.endDate;
     const itineraryStartTime: string | undefined =
       typeof ctx.itineraryStartTime === "string" ? ctx.itineraryStartTime : undefined;
-    emit("context", "Trip details loaded", 0.08, `${startDate} to ${endDate}`);
+    emit("context", "Trip details loaded", 0.05, `${startDate} to ${endDate}`);
     
     if (!startDate || !endDate) {
       throw new Error("Invalid trip dates. Please set start and end dates.");
@@ -146,7 +146,7 @@ export async function planMultiDayTrip(options?: {
     
     const days: string[] = (ctx.days && ctx.days.length) ? ctx.days : buildDaysLocal(startDate, endDate);
     const homebase: LatLng = ctx.homebase;
-    emit("context", `Planning ${days.length} day${days.length === 1 ? "" : "s"}`, 0.12);
+    emit("context", `Planning ${days.length} day${days.length === 1 ? "" : "s"}`, 0.08);
     
     if (!homebase?.lat || !homebase?.lng) {
       throw new Error("Homebase coordinates missing. Please detect your location first.");
@@ -155,13 +155,13 @@ export async function planMultiDayTrip(options?: {
     console.log("Trip context:", { startDate, endDate, days: days.length, homebase });
 
     // 2) prefs + places once
-    emit("preferences", "Loading saved preferences...", 0.18);
+    emit("preferences", "Loading saved preferences...", 0.12);
     const prefs = await getUserPreferences();
     console.log("User preferences loaded:", { 
       hasPrefs: !!prefs.preferences, 
       mustSeeCount: prefs.mustSee?.length || 0 
     });
-    emit("preferences", `Preferences ready (${prefs.mustSee?.length || 0} must-see selections)`, 0.22);
+    emit("preferences", `Preferences ready (${prefs.mustSee?.length || 0} must-see selections)`, 0.15);
 
     let rawPlaces: any[];
     
@@ -170,7 +170,7 @@ export async function planMultiDayTrip(options?: {
       // Reuse pre-loaded places passed as parameter
       console.log(`Reusing ${options.preloadedPlaces.length} pre-loaded places (from parameter)`);
       rawPlaces = options.preloadedPlaces;
-      emit("places", `Using ${rawPlaces.length} pre-loaded places`, 0.28);
+      emit("places", `Using ${rawPlaces.length} pre-loaded places`, 0.18);
     } else {
       // Try to load from AsyncStorage cache first (saved during onboarding)
       try {
@@ -180,7 +180,7 @@ export async function planMultiDayTrip(options?: {
           if (Array.isArray(cachedPlaces) && cachedPlaces.length > 0) {
             console.log(`Reusing ${cachedPlaces.length} cached places from onboarding (avoiding duplicate fetch)`);
             rawPlaces = cachedPlaces;
-            emit("places", `Using ${rawPlaces.length} cached places`, 0.28);
+            emit("places", `Using ${rawPlaces.length} cached places`, 0.18);
           } else {
             throw new Error("Cached places array is empty");
           }
@@ -190,10 +190,10 @@ export async function planMultiDayTrip(options?: {
       } catch (error) {
         // Fallback to fetching if cache doesn't exist or is invalid
         console.log("Cache miss or invalid, fetching places...", error);
-        emit("places", "Finding top attractions near your stay...", 0.28);
+        emit("places", "Finding top attractions near your stay...", 0.18);
         rawPlaces = await fetchPlacesByCoordinates(homebase.lat, homebase.lng);
         console.log("Places fetched:", rawPlaces.length);
-        emit("places", `Fetched ${rawPlaces.length} places`, 0.34);
+        emit("places", `Fetched ${rawPlaces.length} places`, 0.22);
       }
     }
 
@@ -202,7 +202,7 @@ export async function planMultiDayTrip(options?: {
     }
 
     // Filter out avoided places
-    emit("filter", "Applying your avoid list...", 0.38);
+    emit("filter", "Applying your avoid list...", 0.25);
     const avoidPlaces = prefs?.avoidPlaces || [];
     const filteredPlaces = rawPlaces.filter(place => {
       const placeName = place.name?.toLowerCase() || '';
@@ -224,10 +224,10 @@ export async function planMultiDayTrip(options?: {
     });
     
     console.log(`Filtered places: ${rawPlaces.length} to ${filteredPlaces.length} (removed ${rawPlaces.length - filteredPlaces.length} avoided places)`);
-    emit("filter", `Filtered to ${filteredPlaces.length} candidate places`, 0.42);
+    emit("filter", `Filtered to ${filteredPlaces.length} candidate places`, 0.28);
     
     // Prioritize places based on user preferences
-    emit("prioritize", "Prioritizing locations based on your interests...", 0.48);
+    emit("prioritize", "Prioritizing locations based on your interests...", 0.32);
     console.log("User preferences structure:", { 
       hasPrefs: !!prefs, 
       hasPreferences: !!prefs?.preferences,
@@ -238,14 +238,14 @@ export async function planMultiDayTrip(options?: {
     
     const places = prioritizePlacesByPreferences(filteredPlaces, prefs);
     console.log("Places prioritized by user preferences:", places.length);
-    emit("prioritize", `Top ${places.length} places prioritized`, 0.52);
+    emit("prioritize", `Top ${places.length} places prioritized`, 0.35);
 
     // 3) anchor assignment
-    emit("anchors", "Assigning must-see anchors for each day...", 0.56);
+    emit("anchors", "Assigning must-see anchors for each day...", 0.38);
     const mustSet = new Set<string>(Array.isArray(prefs?.mustSee) ? prefs.mustSee : []);
     const anchorsByDay = draftAnchors(days, places, mustSet, 1);
     console.log("Anchors assigned:", Object.keys(anchorsByDay).length, "days");
-    emit("anchors", `Anchors ready for ${days.length} day${days.length === 1 ? "" : "s"}`, 0.6);
+    emit("anchors", `Anchors ready for ${days.length} day${days.length === 1 ? "" : "s"}`, 0.42);
 
     // 4) Multi-stage per-day generation with explicit place filtering
     const used = new Set<string>();
@@ -261,11 +261,12 @@ export async function planMultiDayTrip(options?: {
     for (let i = 0; i < days.length; i++) {
       const date = days[i];
       console.log(`Planning day ${i + 1}/${days.length}: ${date}`);
-      const dayStartProgress = 0.6 + (i / Math.max(days.length, 1)) * 0.3;
+      // Distribute progress from 0.42 to 0.98 across all days
+      const dayStartProgress = 0.42 + (i / Math.max(days.length, 1)) * 0.56;
       emit(
         `day-${i + 1}`,
         `Planning Day ${i + 1} (${date})`,
-        Math.min(dayStartProgress, 0.9),
+        Math.min(dayStartProgress, 0.98),
         `${used.size} places already reserved`
       );
       
@@ -310,6 +311,22 @@ export async function planMultiDayTrip(options?: {
       }
 
       try {
+        // Check weather forecast for this day
+        let weatherForecast: string | null = null;
+        try {
+          const { getWeatherForecastForDate, isRaining } = await import('@/lib/weatherAware');
+          const forecast = await getWeatherForecastForDate(homebase.lat, homebase.lng, date);
+          if (forecast && isRaining(forecast)) {
+            weatherForecast = forecast.condition;
+            console.log(`Weather forecast for ${date}: ${forecast.condition} - will prioritize indoor activities`);
+          } else {
+            console.log(`Weather forecast for ${date}: ${forecast?.condition || 'Sunny (assumed)'}`);
+          }
+        } catch (weatherError) {
+          console.warn(`Could not fetch weather forecast for ${date}, assuming sunny:`, weatherError);
+          // Default to sunny (weatherForecast remains null)
+        }
+
         // Generate itinerary for this day using ONLY the available places
         console.log(`Calling AI with ${dayCandidates.length} shortlisted places for day ${date}`);
         const phase5Start = Date.now();
@@ -323,7 +340,8 @@ export async function planMultiDayTrip(options?: {
           anchorPlaces: anchorIds.map(id => {
             const place = places.find(p => p.place_id === id);
             return place ? place.name : id;
-          }) // Tell AI about the anchor places for this day
+          }), // Tell AI about the anchor places for this day
+          weatherForecast: weatherForecast, // Pass weather forecast to influence indoor/outdoor selection
         });
         const phase5Duration = Date.now() - phase5Start;
         console.log(`⏱️ PHASE 5: Daily Itinerary Generation - Day ${i + 1} (${date}): ${(phase5Duration / 1000).toFixed(2)}s`);
@@ -667,11 +685,12 @@ export async function planMultiDayTrip(options?: {
         outDays.push({ date, anchorIds, itinerary: optimized, pool });
         
         console.log(`Day ${date} planned: ${optimized.length} activities`);
-        const dayEndProgress = 0.6 + ((i + 1) / Math.max(days.length, 1)) * 0.3;
+        // Update progress for each day completion, distributed from 0.42 to 0.98
+        const dayEndProgress = 0.42 + ((i + 1) / Math.max(days.length, 1)) * 0.56;
         emit(
           `day-${i + 1}-complete`,
           `Day ${i + 1} planned (${optimized.length} activities)`,
-          Math.min(dayEndProgress, 0.92)
+          Math.min(dayEndProgress, 0.98)
         );
       } catch (dayError) {
         console.error(`Error planning day ${date}:`, dayError);

@@ -121,6 +121,9 @@ export default function Index() {
   // Step 3 selection grid
   const [candidates, setCandidates] = useState<any[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  
+  // Transportation mode
+  const [transportationMode, setTransportationMode] = useState<"transit" | "driving">("transit");
 
   // ------- Helpers -------
   const buildPreferenceCandidates = (source: any[], maxPerCat = 8, cap = 50) => {
@@ -314,6 +317,7 @@ export default function Index() {
         gender,
         accommodationAddress: city || "",
         itineraryStartTime: itineraryStart,
+        transportationMode: transportationMode || "transit",
       };
 
       // 4) Save everything to AsyncStorage
@@ -762,19 +766,44 @@ export default function Index() {
                 const a = Number(age);
                 const h = Number(height);
                 const w = Number(weight);
-                if (!a || !h || !w || !gender) {
-                  Alert.alert("Missing info", "Please fill in all fields including gender.");
+                
+                // Validation
+                if (!age.trim() || !height.trim() || !weight.trim() || !gender) {
+                  Alert.alert("Missing Information", "Please fill in all fields including age, height, weight, and gender.");
                   return;
                 }
-                if (a < 5 || a > 100 || h < 90 || h > 230 || w < 25 || w > 250) {
-                  Alert.alert("Check your inputs","Please enter realistic Age, Height (cm), and Weight (kg).");
+                
+                if (isNaN(a) || a < 5 || a > 120) {
+                  Alert.alert("Invalid Age", "Please enter a valid age between 5 and 120 years.");
                   return;
                 }
+                
+                if (isNaN(h) || h < 90 || h > 250) {
+                  Alert.alert("Invalid Height", "Please enter a valid height between 90 and 250 cm.");
+                  return;
+                }
+                
+                if (isNaN(w) || w < 20 || w > 300) {
+                  Alert.alert("Invalid Weight", "Please enter a valid weight between 20 and 300 kg.");
+                  return;
+                }
+                
                 setOnboardStep(2);
               }}
-              className="bg-primary-100 py-4 px-6 rounded-xl mt-8"
+              disabled={!age.trim() || !height.trim() || !weight.trim() || !gender}
+              className={`py-4 px-6 rounded-xl mt-8 ${
+                age.trim() && height.trim() && weight.trim() && gender 
+                  ? "bg-primary-100" 
+                  : "bg-gray-300"
+              }`}
             >
-              <Text className="text-white text-center font-rubik-bold text-lg">Continue</Text>
+              <Text className={`text-center font-rubik-bold text-lg ${
+                age.trim() && height.trim() && weight.trim() && gender 
+                  ? "text-white" 
+                  : "text-gray-500"
+              }`}>
+                Continue
+              </Text>
             </TouchableOpacity>
           </View>
         )}
@@ -790,7 +819,6 @@ export default function Index() {
               onConfirm={(range) => {
                 setStartDate(range.startDate);
                 setEndDate(range.endDate);
-                setShowTimePicker(true);
               }}
             />
 
@@ -811,12 +839,15 @@ export default function Index() {
                 <Text className="text-primary-900 text-sm font-rubik-medium text-center">
                   {formatDateLabel(startDate)} → {formatDateLabel(endDate)}
                 </Text>
+                <Text className="text-primary-900 text-xs font-rubik-medium text-center mt-3 mb-3 opacity-75">
+                  Choose the time you'd like to start your daily schedule. This time will be used as the starting point for all your planned activities throughout the trip.
+                </Text>
                 <TouchableOpacity
                   onPress={() => setShowTimePicker(true)}
-                  className="mt-4 px-5 py-2 rounded-full border border-primary-100"
+                  className="mt-2 px-5 py-2 rounded-full bg-primary-100"
                 >
-                  <Text className="text-primary-100 font-rubik-semibold text-sm">
-                    Adjust start time ({itineraryStart})
+                  <Text className="text-white font-rubik-semibold text-sm">
+                    Select Start Time ({itineraryStart})
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -848,12 +879,24 @@ export default function Index() {
                     Alert.alert("Select dates", "Please choose a start and end date before continuing.");
                     return;
                   }
+                  if (!itineraryStart || itineraryStart.trim() === "") {
+                    Alert.alert("Select Start Time", "Please select a start time for your daily schedule before continuing.");
+                    return;
+                  }
                   setOnboardStep(3);
                 }}
-                className={`flex-1 py-4 px-6 rounded-xl ${startDate && endDate ? "bg-primary-100" : "bg-gray-300"}`}
-                disabled={!startDate || !endDate}
+                disabled={!startDate || !endDate || !itineraryStart || itineraryStart.trim() === ""}
+                className={`flex-1 py-4 px-6 rounded-xl ${
+                  startDate && endDate && itineraryStart && itineraryStart.trim() !== ""
+                    ? "bg-primary-100" 
+                    : "bg-gray-300"
+                }`}
               >
-                <Text className={`text-center font-rubik-bold text-lg ${startDate && endDate ? "text-white" : "text-gray-500"}`}>
+                <Text className={`text-center font-rubik-bold text-lg ${
+                  startDate && endDate && itineraryStart && itineraryStart.trim() !== ""
+                    ? "text-white" 
+                    : "text-gray-500"
+                }`}>
                   Confirm
                 </Text>
               </TouchableOpacity>
@@ -945,6 +988,54 @@ export default function Index() {
                 )}
               </TouchableOpacity>
             </View>
+
+            {/* Transportation Mode Selection */}
+            <View className="mb-6">
+              <Text className="font-rubik-semibold mb-3 text-gray-700">Transportation Mode</Text>
+              <Text className="text-xs text-gray-500 mb-3">
+                Choose how you'll travel between attractions. This affects travel time calculations.
+              </Text>
+              <View className="flex-row gap-3">
+                <TouchableOpacity
+                  onPress={() => setTransportationMode("transit")}
+                  className={`flex-1 py-4 px-4 rounded-xl border-2 ${
+                    transportationMode === "transit"
+                      ? "border-primary-100 bg-primary-50"
+                      : "border-gray-300 bg-white"
+                  }`}
+                >
+                  <Text className={`text-center font-rubik-semibold ${
+                    transportationMode === "transit" ? "text-primary-100" : "text-gray-700"
+                  }`}>
+                    Public Transport
+                  </Text>
+                  <Text className={`text-center text-xs mt-1 ${
+                    transportationMode === "transit" ? "text-primary-100" : "text-gray-500"
+                  }`}>
+                    Bus/Metro
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setTransportationMode("driving")}
+                  className={`flex-1 py-4 px-4 rounded-xl border-2 ${
+                    transportationMode === "driving"
+                      ? "border-primary-100 bg-primary-50"
+                      : "border-gray-300 bg-white"
+                  }`}
+                >
+                  <Text className={`text-center font-rubik-semibold ${
+                    transportationMode === "driving" ? "text-primary-100" : "text-gray-700"
+                  }`}>
+                    Taxi/Car
+                  </Text>
+                  <Text className={`text-center text-xs mt-1 ${
+                    transportationMode === "driving" ? "text-primary-100" : "text-gray-500"
+                  }`}>
+                    Private Vehicle
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
  
             <View className="flex-row gap-4">
               <TouchableOpacity
@@ -1023,23 +1114,25 @@ export default function Index() {
 
             {loading ? (
               <View className="items-center py-10 px-6 bg-gray-50 rounded-2xl border border-gray-200">
-                <Text className="text-lg font-rubik-semibold text-gray-800 mb-3">Curating your shortlist...</Text>
-                <ActivityIndicator size="large" color="#0061ff" />
-                <View style={{ width: "100%" }}>
-                  <View className="h-3 bg-gray-200 rounded-full overflow-hidden">
-                    <View
-                      className="h-3 bg-primary-100 rounded-full"
-                      style={{ width: `${Math.max(8, Math.round((loadingProgress.value || 0) * 100))}%` }}
-                    />
-                  </View>
-                </View>
-                <Text className="text-gray-600 mt-3 text-center">
+                <ActivityIndicator size="small" color="#0B2545" className="mb-2" />
+                <Text className="text-gray-800 text-center font-rubik-bold text-lg mb-3">
+                  Generating Places...
+                </Text>
+                <Text className="text-gray-700 text-center font-rubik-medium text-sm mt-1 mb-3">
                   {loadingProgress.label || "Finding amazing places near you..."}
                 </Text>
-                {typeof estimatedMinutesRemaining === "number" && (
-                  <Text className="text-gray-500 text-sm mt-2 text-center">
-                    Estimated time remaining: about {estimatedMinutesRemaining} minute{estimatedMinutesRemaining === 1 ? "" : "s"}
-                  </Text>
+                {typeof loadingProgress.value === "number" && (
+                  <View className="w-full mt-3">
+                    <View className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <View
+                        className="h-2 bg-primary-100 rounded-full"
+                        style={{ width: `${Math.min(100, Math.max(0, (loadingProgress.value || 0) * 100))}%` }}
+                      />
+                    </View>
+                    <Text className="text-gray-600 text-xs text-center mt-1">
+                      {Math.round((loadingProgress.value || 0) * 100)}% complete
+                    </Text>
+                  </View>
                 )}
               </View>
             ) : (

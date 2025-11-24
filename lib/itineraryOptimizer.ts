@@ -1,4 +1,5 @@
 // lib/itineraryOptimizer.ts
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { buildTravelGraph, optimizeItinerary } from "./routeOptimizer";
 
 // ---- Debug helper -----------------------------------------------------------
@@ -127,8 +128,20 @@ export const reconstructItinerary = async (
       }));
     }
 
+    // Get transportation mode from tripContext
+    let transportationMode: "transit" | "driving" = "transit";
+    try {
+      const tripContextStr = await AsyncStorage.getItem("tripContext");
+      if (tripContextStr) {
+        const tripContext = JSON.parse(tripContextStr);
+        transportationMode = tripContext.transportationMode || "transit";
+      }
+    } catch (e) {
+      console.warn("Could not load transportation mode, defaulting to transit", e);
+    }
+
     // Build travel graph and optimize visiting order (keeps your existing APIs)
-    const { graph } = await buildTravelGraph(userCoords, attractions);
+    const { graph } = await buildTravelGraph(userCoords, attractions, transportationMode);
     dbg("graph built nodes", graph?.nodes?.length ?? "n/a");
 
     const optimizedAttractions = optimizeItinerary(userCoords, attractions, graph, startAt);
@@ -167,27 +180,27 @@ export const reconstructItinerary = async (
     // Now rebuild a timed plan from the configured start, with meal suggestions instead of blocks
     const itineraryItems: any[] = [];
     const mealSuggestions = { lunch: false, dinner: false }; // Track if we've suggested meals
-    let currentTime = timeToMinutes(startAt);
+  let currentTime = timeToMinutes(startAt);
 
-    for (let idx = 0; idx < optimizedAttractions.length; idx++) {
-      const item = optimizedAttractions[idx];
+  for (let idx = 0; idx < optimizedAttractions.length; idx++) {
+    const item = optimizedAttractions[idx];
 
-      dbg("step:start", {
-        item: item.name,
-        rawDuration: item.estimated_duration,
-        rawTravelTime: item.travel_time_minutes,
-        currentTime,
-      });
+    dbg("step:start", {
+      item: item.name,
+      rawDuration: item.estimated_duration,
+      rawTravelTime: item.travel_time_minutes,
+      currentTime,
+    });
 
-      const travelTime = Number.isFinite(item.travel_time_minutes)
-        ? Math.max(0, Math.floor(item.travel_time_minutes))
-        : 10;
+    const travelTime = Number.isFinite(item.travel_time_minutes)
+      ? Math.max(0, Math.floor(item.travel_time_minutes))
+      : 10;
 
       currentTime += travelTime;
       dbg("step:arrival", { item: item.name, afterTravel: currentTime, travelTime });
 
       // Calculate activity times
-      const duration = parseDurationToMinutes(item.estimated_duration);
+    const duration = parseDurationToMinutes(item.estimated_duration);
       let start_time = minutesToTime(currentTime);
       let activityStartMinutes = currentTime;
       let activityEndMinutes = currentTime + duration;
@@ -266,13 +279,13 @@ export const reconstructItinerary = async (
         : (item.lat && item.lng ? { lat: item.lat, lng: item.lng } : null);
       
       itineraryItems.push({
-        ...item,
+      ...item,
         coordinates: coordinatesObj || item.coordinates, // Preserve or create coordinates object
         estimated_duration: finalDuration,
-        start_time,
-        end_time,
-        travel_time_minutes: travelTime,
-      });
+      start_time,
+      end_time,
+      travel_time_minutes: travelTime,
+    });
 
       // Update currentTime to activity end time for next activity
       currentTime = activityEndMinutes;

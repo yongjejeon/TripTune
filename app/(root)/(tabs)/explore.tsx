@@ -1,19 +1,21 @@
 // screens/Explore.tsx
+import { reconstructItinerary } from "@/lib/itineraryOptimizer";
 import { planMultiDayTrip, type MultiDayProgressUpdate } from "@/lib/multidayPlanner";
+import { regenerateItineraryAfterReplacement, validateReplacement } from "@/lib/personalize";
 import { calculateScheduleStatus, generateScheduleAdjustments, saveScheduleAdjustment } from "@/lib/scheduleManager";
-import { adaptItineraryForWeather, getDetailedWeather } from "@/lib/weatherAware";
+import { checkWeatherForOutdoorActivities } from "@/lib/weatherAware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFocusEffect } from "expo-router";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    ScrollView,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  ScrollView,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import MapView, { Marker, Polyline } from "react-native-maps";
 
@@ -39,6 +41,43 @@ const minutesToTime = (mins: number) => {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+};
+
+// Timeline helpers
+const getTimelineStartTime = (itinerary: any[], userStartTime?: string): number => {
+  // Use user's preferred start time if provided
+  if (userStartTime) {
+    const userStartMinutes = timeToMinutes(userStartTime);
+    // Round down to nearest hour
+    return Math.floor(userStartMinutes / 60) * 60;
+  }
+  
+  // Otherwise, use earliest activity time or default to 9:00 AM
+  if (!itinerary || itinerary.length === 0) return 9 * 60;
+  const earliest = Math.min(...itinerary.map((item: any) => {
+    if (!item.start_time) return 9 * 60;
+    return timeToMinutes(item.start_time);
+  }));
+  // Round down to nearest hour
+  return Math.floor(earliest / 60) * 60;
+};
+
+const getTimelineEndTime = (): number => {
+  return 21 * 60; // 9:00 PM (21:00)
+};
+
+const getTimePosition = (timeStr: string, startTime: number, endTime: number, totalHeight: number): number => {
+  const timeMinutes = timeToMinutes(timeStr);
+  const totalMinutes = endTime - startTime;
+  const minutesFromStart = timeMinutes - startTime;
+  const percentage = minutesFromStart / totalMinutes;
+  return percentage * totalHeight;
+};
+
+const getDurationHeight = (startTimeStr: string, endTimeStr: string, startTime: number, endTime: number, totalHeight: number): number => {
+  const startPos = getTimePosition(startTimeStr, startTime, endTime, totalHeight);
+  const endPos = getTimePosition(endTimeStr, startTime, endTime, totalHeight);
+  return endPos - startPos;
 };
 const formatDuration = (minutes: number) => {
   if (!minutes && minutes !== 0) return "N/A";
@@ -141,6 +180,15 @@ export default function Explore() {
   const [lastDateNotice, setLastDateNotice] = useState<number>(0);
   const [replaceContext, setReplaceContext] = useState<{ dayIndex: number; itemIndex: number } | null>(null);
   const [replacementSuggestions, setReplacementSuggestions] = useState<any[] | null>(null);
+  
+  // Weather-related state
+  const lastWeatherCheckRef = useRef<number>(0);
+  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0); // For UI day selection
+  const [itineraryStartTime, setItineraryStartTime] = useState<string | undefined>(undefined);
+  const [expandedTransport, setExpandedTransport] = useState<Set<string>>(new Set()); // Track which transport sections are expanded
+  const [expandedFood, setExpandedFood] = useState<Set<string>>(new Set()); // Track which food suggestion sections are expanded
+  const [expandedReason, setExpandedReason] = useState<Set<string>>(new Set()); // Track which reason sections are expanded
+  const [expandedActivityCards, setExpandedActivityCards] = useState<Set<string>>(new Set()); // Track which activity cards are expanded
 
   // tracking state
   const [isTracking, setIsTracking] = useState(false);
@@ -186,11 +234,29 @@ export default function Explore() {
   useEffect(() => {
     (async () => {
       try {
+        // Load itinerary start time preference
+        const storedStartTime = await fetchStoredItineraryStart();
+        if (storedStartTime) {
+          setItineraryStartTime(storedStartTime);
+        }
+        
         const saved = await AsyncStorage.getItem("savedTripPlan");
         if (saved) {
           const trip = JSON.parse(saved);
           setTripPlan(trip);
           console.log("Auto-loaded saved multi-day trip");
+          
+          // Auto-select today's day if it exists
+          if (trip?.days?.length) {
+            const today = new Date();
+            const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+            const todayIndex = trip.days.findIndex((d: any) => d.date === todayStr);
+            if (todayIndex !== -1) {
+              setSelectedDayIndex(todayIndex);
+            } else {
+              setSelectedDayIndex(0); // Default to first day
+            }
+          }
         }
       } catch (err) {
         console.error("Failed to auto-load saved trip", err);
@@ -231,6 +297,10 @@ export default function Explore() {
         return;
       }
       setCurrentTripDayIndex(dayIdx);
+      // Auto-select today's day in UI when tracking starts
+      if (isTracking && selectedDayIndex !== dayIdx) {
+        setSelectedDayIndex(dayIdx);
+      }
       const todaysItinerary = tripPlan.days[dayIdx]?.itinerary || [];
       if (!todaysItinerary.length) {
         setCurrentActivityIdx(null);
@@ -291,8 +361,8 @@ export default function Explore() {
       }
       return;
     }
- 
-     // Fallback: single-day itineraries
+
+    // Fallback: single-day itineraries
     const fallbackDayIndex = (currentTripDayIndex != null && tripPlan?.days?.[currentTripDayIndex]) ? currentTripDayIndex : 0;
     const itinerary = weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || tripPlan?.days?.[fallbackDayIndex]?.itinerary;
     if (!itinerary) return;
@@ -345,8 +415,15 @@ export default function Explore() {
             console.error('Failed to generate schedule adjustments:', error);
           });
       }
+
+      // Check weather for outdoor activities (every 5 minutes or when activity changes)
+      const timeSinceLastWeatherCheck = nowTs - lastWeatherCheckRef.current;
+      if (timeSinceLastWeatherCheck > 300000 || newCurrentIdx !== currentActivityIdx) { // 5 minutes or activity changed
+        lastWeatherCheckRef.current = nowTs;
+        // This will be handled by the useEffect below that checks weather periodically
+      }
     }
-  }, [isTracking, userLocation, optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, lastScheduleCheck, lastDateNotice]);
+  }, [isTracking, userLocation, optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, lastScheduleCheck, lastDateNotice, selectedDayIndex, currentActivityIdx]);
 
   // ---------------- Generate / View / Optimize ----------------
   const resetLoadingStatus = useCallback(() => {
@@ -364,8 +441,8 @@ export default function Explore() {
 
   const runMultiDayGeneration = useCallback(
     async ({ silent }: { silent?: boolean } = {}) => {
-      try {
-        setLoading(true);
+    try {
+      setLoading(true);
         resetLoadingStatus();
         handleStatusUpdate({ stage: "init", message: "Starting multi-day trip planning...", progress: 0.02 });
 
@@ -385,21 +462,30 @@ export default function Explore() {
           setOptimizedResult(null);
         }
         setWeatherAdaptedResult(null);
-        await AsyncStorage.setItem("savedTripPlan", JSON.stringify(trip));
-
-        if (!silent) {
-          Alert.alert(
-            "Multi-day trip ready",
-            `We planned ${trip.days.length} day${trip.days.length === 1 ? "" : "s"} with ${trip.days.reduce((sum: number, day: any) => sum + day.itinerary.length, 0)} activities.`
-          );
+        
+        // Auto-select today's day if it exists, otherwise default to first day
+        if (trip?.days?.length) {
+          const today = new Date();
+          const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          const todayIndex = trip.days.findIndex((d: any) => d.date === todayStr);
+          if (todayIndex !== -1) {
+            setSelectedDayIndex(todayIndex);
+            setCurrentTripDayIndex(todayIndex);
+      } else {
+            setSelectedDayIndex(0);
+          }
         }
-      } catch (e: any) {
+        
+      await AsyncStorage.setItem("savedTripPlan", JSON.stringify(trip));
+
+        // Notification removed - trip plan is displayed directly
+    } catch (e: any) {
         console.error("Trip generation failed:", e?.message || e);
         if (!silent) {
           Alert.alert("Error", e?.message || "Failed to generate trip");
         }
-      } finally {
-        setLoading(false);
+    } finally {
+      setLoading(false);
         resetLoadingStatus();
       }
     },
@@ -422,15 +508,15 @@ export default function Explore() {
             await AsyncStorage.removeItem("pendingAutoGenerateTripPlan");
             if (!isActive) return;
             await runMultiDayGeneration({ silent: false });
-          }
-        } catch (err) {
+      }
+    } catch (err) {
           console.error("Failed to handle pending auto generation", err);
-        }
+    }
       })();
 
       return () => {
         isActive = false;
-      };
+  };
     }, [runMultiDayGeneration])
   );
 
@@ -485,6 +571,14 @@ export default function Explore() {
         return;
       }
 
+      // Auto-expand the card when Replace is clicked so replacement suggestions are visible
+      const itemKey = `${day.date}-${itemIndex}`;
+      setExpandedActivityCards(prev => {
+        const newSet = new Set<string>();
+        newSet.add(itemKey);
+        return newSet;
+      });
+
       const exclude = getUsedPlaceNamesFromTripPlan();
       const suggestions = await recommendReplacements(baseLat, baseLng, exclude, dayIndex);
       setReplaceContext({ dayIndex, itemIndex });
@@ -500,30 +594,78 @@ export default function Explore() {
     const day = tripPlan.days[dayIndex];
     const item = day.itinerary[itemIndex];
     if (!item) return;
-    const replacement = {
-      ...item,
+
+    // Validate replacement
+    const validation = validateReplacement({
+      place_id: p.place_id,
       name: p.name,
-      category: p.category ?? item.category ?? "activity",
-      coordinates: { lat: p.lat, lng: p.lng },
       lat: p.lat,
       lng: p.lng,
+    });
+
+    if (!validation.valid) {
+      Alert.alert("Error", validation.error || "Invalid replacement place");
+      return;
+    }
+
+    if (!userLocation) {
+      Alert.alert("Location Required", "Location is needed to regenerate the itinerary");
+      return;
+    }
+
+    try {
+      // Show loading indicator
+      Alert.alert("Regenerating", "Re-generating itinerary with new activity and adjusted times...");
+
+      // Get start time for the day
+      const startTime = await fetchStoredItineraryStart();
+
+      // Regenerate itinerary with the replacement
+      const reoptimized = await regenerateItineraryAfterReplacement(
+        day.itinerary,
+        itemIndex,
+        {
       place_id: p.place_id,
+          name: p.name,
+          lat: p.lat,
+          lng: p.lng,
+          category: p.category ?? item.category ?? "activity",
       photoUrl: p.photoUrl,
       rating: p.rating,
       user_ratings_total: p.user_ratings_total,
-    };
+        },
+        {
+          userLocation,
+          startTime,
+        }
+      );
+
+      // Update trip plan with regenerated itinerary
     const newPlan = { ...tripPlan };
     const dayCopy = { ...newPlan.days[dayIndex] };
-    const itCopy = [...dayCopy.itinerary];
-    itCopy[itemIndex] = replacement;
-    dayCopy.itinerary = itCopy;
+      dayCopy.itinerary = reoptimized;
     newPlan.days = [...newPlan.days];
     newPlan.days[dayIndex] = dayCopy;
     setTripPlan(newPlan);
     await AsyncStorage.setItem("savedTripPlan", JSON.stringify(newPlan));
+
+      // Update optimized result if viewing the same day
+      if (dayIndex === selectedDayIndex) {
+        setOptimizedResult({ itinerary: reoptimized });
+      }
+
     setReplaceContext(null);
     setReplacementSuggestions(null);
-  }, [tripPlan]);
+
+      Alert.alert(
+        "Replaced & Regenerated",
+        `"${item.name}" has been replaced with "${p.name}" and the itinerary has been regenerated with adjusted times.`
+      );
+    } catch (error: any) {
+      console.error("Failed to apply replacement and regenerate:", error);
+      Alert.alert("Error", error?.message || "Failed to replace activity and regenerate itinerary");
+    }
+  }, [tripPlan, userLocation, selectedDayIndex]);
 
   const cancelReplacement = useCallback(() => {
     setReplaceContext(null);
@@ -672,94 +814,212 @@ export default function Explore() {
     };
   }, []);
 
-  // ---------------- Automatic Weather Detection & Adaptation ----------------
-  const checkWeatherAndAdapt = useCallback(async (showAlert = false) => {
+  // ---------------- Weather Replacement Prompt ----------------
+  const showWeatherReplacementPrompt = useCallback((result: {
+    activity: any;
+    activityIndex: number;
+    alternatives: any[];
+    weather: any;
+  }) => {
+    if (!result.alternatives || result.alternatives.length === 0) return;
+
+    const { activity, activityIndex, alternatives, weather } = result;
+    
+    // Build alert message with 3 alternatives
+    const alternativesList = alternatives
+      .map((alt, idx) => `${idx + 1}. ${alt.name}${alt.rating ? ` (⭐ ${alt.rating})` : ''}`)
+      .join('\n');
+
+            Alert.alert(
+      "🌧️ Rain Detected",
+      `We detected that it is raining. Would you like to replace "${activity.name}" (outdoor activity) with one of these indoor alternatives?\n\n${alternativesList}\n\nNote: Only remaining activities will be affected.`,
+      [
+        {
+          text: alternatives[0]?.name || "Option 1",
+          onPress: () => applyWeatherReplacement(activityIndex, alternatives[0], activity),
+        },
+        {
+          text: alternatives[1]?.name || "Option 2",
+          onPress: () => applyWeatherReplacement(activityIndex, alternatives[1], activity),
+        },
+        {
+          text: alternatives[2]?.name || "Option 3",
+          onPress: () => applyWeatherReplacement(activityIndex, alternatives[2], activity),
+        },
+        {
+          text: "Keep Original",
+          style: "cancel",
+          onPress: () => {
+            console.log("User chose to keep outdoor activity despite rain");
+          }
+        }
+      ],
+      { cancelable: true }
+    );
+  }, []);
+
+  const applyWeatherReplacement = useCallback(async (
+    activityIndex: number,
+    alternative: any,
+    originalActivity: any
+  ) => {
     if (!userLocation) {
-      if (showAlert) {
-        Alert.alert("Location Required", "Please enable location to check weather");
-      }
+      Alert.alert("Location Required", "Location is needed to re-optimize the itinerary");
       return;
     }
 
     try {
-      console.log("Auto-checking weather and adapting itinerary...");
-      
-      const weather = await getDetailedWeather(userLocation.lat, userLocation.lng);
-      if (!weather) {
-        if (showAlert) {
-          Alert.alert("Weather Unavailable", "Could not fetch weather data");
+      // Show loading indicator
+      Alert.alert("Reoptimizing", "Re-generating itinerary with new activity and adjusted times...");
+
+      let currentItinerary: any[] = [];
+      let isMultiDay = false;
+      let dayIndex = currentTripDayIndex;
+
+      // Get the current itinerary
+      if (tripPlan && currentTripDayIndex !== null) {
+        // Multi-day trip
+        const day = tripPlan.days[currentTripDayIndex];
+        if (day && day.itinerary) {
+          currentItinerary = [...day.itinerary];
+          isMultiDay = true;
         }
+      } else {
+        // Single-day itinerary
+        currentItinerary = [...(weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || [])];
+      }
+
+      if (activityIndex < 0 || activityIndex >= currentItinerary.length) {
+        Alert.alert("Error", "Invalid activity index");
         return;
       }
 
-      setCurrentWeather(weather);
-      setLastWeatherCheck(Date.now());
-      console.log(`Current weather: ${weather.condition} (${weather.temperature} C)`);
+      // Ensure the alternative has required location fields
+      const altLat = alternative.lat || alternative.coordinates?.lat;
+      const altLng = alternative.lng || alternative.coordinates?.lng;
+      
+      if (!altLat || !altLng) {
+        Alert.alert("Error", "Alternative location information is missing");
+        return;
+      }
 
-      // Adapt current itinerary if available
-      if (optimizedResult?.itinerary) {
-        const { adaptedItinerary, changes } = await adaptItineraryForWeather(
-          optimizedResult.itinerary,
+      // Use the personalize function to regenerate itinerary with replacement
+      // This handles opening hours, time adjustments, and route optimization
+      const startTime = await fetchStoredItineraryStart();
+      console.log("Regenerating itinerary after weather replacement...");
+      
+      const reoptimized = await regenerateItineraryAfterReplacement(
+        currentItinerary,
+        activityIndex,
+        {
+          place_id: alternative.place_id || originalActivity.place_id,
+          name: alternative.name,
+          lat: altLat,
+          lng: altLng,
+          category: alternative.category || originalActivity.category || 'indoor',
+          photoUrl: alternative.photoUrl || originalActivity.photoUrl,
+          rating: alternative.rating ?? originalActivity.rating,
+          user_ratings_total: alternative.user_ratings_total ?? originalActivity.user_ratings_total,
+        },
+        {
           userLocation,
-          currentActivityIdx || 0
-        );
+          startTime,
+          replacementMetadata: {
+            isWeatherReplacement: true,
+            weatherReason: 'Replaced due to rain',
+            replacementReason: 'Weather-based replacement',
+          },
+        }
+      );
 
-        if (changes.length > 0) {
-          setWeatherAdaptedResult({ itinerary: adaptedItinerary });
-          console.log(`Weather adaptation applied: ${changes.length} changes due to ${weather.condition} weather`);
-          
-          if (showAlert) {
-            Alert.alert(
-              "Weather Adaptation Applied",
-              `Made ${changes.length} changes due to ${weather.condition} weather:\n\n${changes.join('\n')}`
-            );
+      if (!reoptimized || reoptimized.length === 0) {
+        Alert.alert("Error", "Failed to re-optimize itinerary");
+        return;
+      }
+
+      // Update the itinerary with re-optimized times
+      if (isMultiDay && tripPlan && dayIndex !== null) {
+        // Update multi-day trip plan
+        const newPlan = { ...tripPlan };
+        const dayCopy = { ...newPlan.days[dayIndex] };
+        dayCopy.itinerary = reoptimized;
+        newPlan.days = [...newPlan.days];
+        newPlan.days[dayIndex] = dayCopy;
+        setTripPlan(newPlan);
+        await AsyncStorage.setItem("savedTripPlan", JSON.stringify(newPlan));
+        
+        // Also update optimized result if viewing the same day
+        if (dayIndex === selectedDayIndex) {
+          setOptimizedResult({ itinerary: reoptimized });
           }
         } else {
-          console.log(`Weather is suitable for current itinerary (${weather.condition})`);
-          if (showAlert) {
-            Alert.alert("Weather Check Complete", `Weather is suitable for your current itinerary (${weather.condition})`);
-          }
+        // Update single-day itinerary
+        if (weatherAdaptedResult) {
+          setWeatherAdaptedResult({ itinerary: reoptimized });
+      } else {
+          setOptimizedResult({ itinerary: reoptimized });
+        }
+      }
+
+      Alert.alert(
+        "Replaced & Re-optimized",
+        `"${originalActivity.name}" has been replaced with "${alternative.name}" and the itinerary times have been adjusted.`
+      );
+    } catch (error) {
+      console.error("Failed to apply weather replacement:", error);
+      Alert.alert("Error", "Failed to replace and re-optimize activity");
+      }
+  }, [optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, selectedDayIndex, userLocation]);
+
+  // ---------------- Periodic Weather Checking During Tracking ----------------
+  useEffect(() => {
+    if (!isTracking || !userLocation) return;
+
+    const checkWeatherForRain = async () => {
+      try {
+        // Get the correct itinerary based on trip plan or single-day
+        let itinerary: any[] = [];
+        let activityIndex = currentActivityIdx;
+
+        if (tripPlan && currentTripDayIndex !== null) {
+          // Multi-day trip - use current day's itinerary
+          const day = tripPlan.days[currentTripDayIndex];
+          if (day && day.itinerary) {
+            itinerary = day.itinerary;
         }
       } else {
-        console.log(`Weather checked: ${weather.condition} (${weather.temperature} C)`);
-        if (showAlert) {
-          Alert.alert("Weather Check Complete", `Current weather: ${weather.condition} (${weather.temperature} C)`);
+          // Single-day itinerary
+          itinerary = weatherAdaptedResult?.itinerary || optimizedResult?.itinerary || [];
         }
-      }
-    } catch (error) {
-      console.error("Weather adaptation failed:", error);
-      if (showAlert) {
-        Alert.alert("Error", "Failed to check weather and adapt itinerary");
-      }
-    }
-  }, [userLocation, optimizedResult, currentActivityIdx]);
 
-  // ---------------- Automatic Weather Checking (Every Hour) ----------------
-  useEffect(() => {
-    const checkWeatherInterval = () => {
-      const now = Date.now();
-      const oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
-      
-      // Check if it's been more than an hour since last weather check
-      if (now - lastWeatherCheck > oneHour) {
-        console.log("Hourly weather check triggered");
-        checkWeatherAndAdapt(false); // Silent check, no alerts
+        if (itinerary.length === 0 || activityIndex === null || activityIndex < 0) {
+          return;
+        }
+
+        const result = await checkWeatherForOutdoorActivities(
+          itinerary,
+          userLocation,
+          activityIndex
+        );
+
+        if (result && result.needsAdaptation && result.alternatives.length > 0) {
+          showWeatherReplacementPrompt(result);
+        }
+      } catch (error) {
+        console.error("Failed to check weather for rain:", error);
       }
     };
 
-    // Check weather immediately when location is available
-    if (userLocation && lastWeatherCheck === 0) {
-      console.log("Initial weather check on location detection");
-      checkWeatherAndAdapt(false);
-    }
+    // Check immediately when tracking starts or when current activity changes
+    checkWeatherForRain();
 
-    // Set up interval to check every 15 minutes (to catch the 1-hour mark)
-    const weatherInterval = setInterval(checkWeatherInterval, 15 * 60 * 1000);
+    // Check every 5 minutes while tracking
+    const weatherInterval = setInterval(checkWeatherForRain, 5 * 60 * 1000);
 
     return () => {
       clearInterval(weatherInterval);
     };
-  }, [userLocation, lastWeatherCheck, checkWeatherAndAdapt]);
+  }, [isTracking, userLocation, weatherAdaptedResult, optimizedResult, currentActivityIdx, tripPlan, currentTripDayIndex, showWeatherReplacementPrompt]);
 
   // ---------------- Schedule Adjustment Prompts ----------------
   const showScheduleAdjustmentPrompt = useCallback(async (adjustments: any[]) => {
@@ -1116,9 +1376,11 @@ export default function Explore() {
               </Text>
             </View>
             <View className="items-end">
+              {currentWeather.timestamp && (
               <Text className="text-xs text-gray-500">
                 {new Date(currentWeather.timestamp).toLocaleTimeString()}
               </Text>
+              )}
               <Text className="text-xs text-green-600 font-rubik-medium">
                 Auto-updating
               </Text>
@@ -1183,46 +1445,78 @@ export default function Explore() {
   return (
     <View className="h-full bg-white" style={{ paddingTop: 50 }}>
       <ScrollView contentContainerClassName="pb-32">
-        
+        <>
         {/* Header */}
         <View className="px-7 pt-4 pb-2">
           <Text className="text-2xl font-rubik-bold mb-2">TripTune Explorer</Text>
-          <Text className="text-gray-600">Your AI-powered travel companion</Text>
         </View>
 
-        {/* Status Badges */}
+          {/* Status Badges - Only show when tracking */}
+          {isTracking && (
         <View className="px-7 mb-4">
           {fatigueBadge}
           {weatherBadge}
           {scheduleBadge}
         </View>
+          )}
 
         {/* Map temporarily disabled per request to avoid related errors */}
 
         {/* Main Action Buttons */}
         <View className="px-7 mb-6">
-          <TouchableOpacity
-            onPress={isTracking ? stopTracking : startTracking}
-            className="w-full bg-primary-100 py-4 px-6 rounded-xl"
-          >
-            <Text className="text-white text-center font-rubik-bold text-lg">
-              {isTracking ? "Stop Tracking" : "Start Tracking"}
-            </Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              onPress={isTracking ? stopTracking : startTracking}
+              className="w-full bg-primary-100 py-4 px-6 rounded-xl"
+            >
+              <Text className="text-white text-center font-rubik-bold text-lg">
+                {isTracking ? "Stop Tracking" : "Start Tracking"}
+              </Text>
+            </TouchableOpacity>
         </View>
 
         <View className="px-7 mb-6">
-          <TouchableOpacity
-            onPress={handleMultiDay}
-            className="w-full bg-primary-100 py-4 px-6 rounded-xl"
-          >
-            <Text className="text-white text-center font-rubik-bold text-lg">
-              Generate Multi-day Plan
-            </Text>
-          </TouchableOpacity>
+            <TouchableOpacity 
+              onPress={handleMultiDay} 
+              disabled={loading}
+              className={`w-full py-4 px-6 rounded-xl ${loading ? 'bg-gray-400' : 'bg-primary-100'}`}
+            >
+              {loading ? (
+                <View className="items-center">
+                  <ActivityIndicator size="small" color="#FFFFFF" className="mb-2" />
+              <Text className="text-white text-center font-rubik-bold text-lg">
+                    Generating Plan...
+              </Text>
+                  {loadingStatus && (
+                    <>
+                      <Text className="text-white text-center font-rubik-medium text-sm mt-1">
+                        {loadingStatus.message}
+                      </Text>
+                      {typeof loadingStatus.progress === "number" && (
+                        <View className="w-full mt-3">
+                          <View className="h-2 bg-white/30 rounded-full overflow-hidden">
+                            <View
+                              className="h-2 bg-white rounded-full"
+                              style={{ width: `${Math.min(100, Math.max(0, loadingStatus.progress * 100))}%` }}
+                            />
+                          </View>
+                          <Text className="text-white text-xs text-center mt-1">
+                            {Math.round((loadingStatus.progress || 0) * 100)}% complete
+                          </Text>
+                        </View>
+                      )}
+                    </>
+                  )}
+                </View>
+              ) : (
+              <Text className="text-white text-center font-rubik-bold text-lg">
+                  Generate Multi-day Plan
+              </Text>
+              )}
+            </TouchableOpacity>
         </View>
 
-        {/* Schedule/Itinerary Display */}
+          {/* Schedule/Itinerary Display - Only show when tracking is active */}
+          {isTracking && (
         <View className="px-7">
           {loading && (
             <View className="mb-8 p-5 rounded-2xl bg-white border border-gray-200 shadow-sm">
@@ -1230,8 +1524,8 @@ export default function Explore() {
                 <ActivityIndicator size="small" color="#0061ff" />
                 <Text className="text-gray-800 font-rubik-semibold flex-1">
                   {loadingStatus?.message ?? "Processing..."}
-                </Text>
-              </View>
+              </Text>
+            </View>
               {loadingStatus?.detail && (
                 <Text className="text-gray-500 text-sm mt-2">{loadingStatus.detail}</Text>
               )}
@@ -1242,10 +1536,10 @@ export default function Explore() {
                       className="h-2 bg-primary-100 rounded-full"
                       style={{ width: `${Math.min(100, Math.max(0, loadingStatus.progress * 100))}%` }}
                     />
-                  </View>
+        </View>
                   <Text className="text-xs text-gray-500 mt-1">
                     {Math.round((loadingStatus.progress || 0) * 100)}% complete
-                  </Text>
+                    </Text>
                 </View>
               )}
               {loadingTimeline.length > 0 && (
@@ -1257,196 +1551,562 @@ export default function Explore() {
                       <View key={entry.stage} className="mb-2">
                         <Text className="text-xs font-rubik-semibold text-gray-700">
                           {entry.message}
-                        </Text>
+                    </Text>
                         {entry.detail && (
                           <Text className="text-xs text-gray-500 mt-0.5">{entry.detail}</Text>
                         )}
-                      </View>
+                  </View>
                     ))}
                 </View>
               )}
             </View>
           )}
 
-          {!loading && optimizedResult?.itinerary && renderItinerary(optimizedResult, "Optimized Itinerary")}
-          {!loading && weatherAdaptedResult?.itinerary && renderItinerary(weatherAdaptedResult, "Weather-Adapted Itinerary")}
-          {!loading && tripPlan?.days?.length ? (
-            <View className="mt-8">
-              <View className="bg-blue-50 p-4 rounded-lg mb-6 border border-blue-200">
-                <View className="flex-row justify-between items-start mb-2">
-                  <View className="flex-1">
-                    <Text className="text-2xl font-rubik-bold text-blue-800">
-                      Multi-day Trip Plan
-                    </Text>
-                    <Text className="text-lg font-rubik-semibold text-blue-700">
-                      {tripPlan.startDate} to {tripPlan.endDate}
-                    </Text>
-                    <Text className="text-sm text-blue-600 mt-1">
-                      {tripPlan.days.length} days - {tripPlan.days.reduce((sum: number, day: any) => sum + day.itinerary.length, 0)} total activities
-                    </Text>
-                  </View>
+              {!loading && optimizedResult?.itinerary && renderItinerary(optimizedResult, "Optimized Itinerary")}
+              {!loading && weatherAdaptedResult?.itinerary && renderItinerary(weatherAdaptedResult, "Weather-Adapted Itinerary")}
+            </View>
+          )}
+
+          {/* Trip Plan Overview - Always visible (when trip exists) */}
+          {!loading && tripPlan?.days?.length && (
+            <View className="px-7 mt-6">
+              {/* Day Selector - Minimalistic horizontal tabs */}
+              <View className="mb-4">
+                <ScrollView 
+                  horizontal 
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingRight: 16 }}
+                >
+                  {tripPlan.days.map((day: any, dayIndex: number) => {
+                    const isSelected = selectedDayIndex === dayIndex;
+                    
+                    return (
                   <TouchableOpacity
-                    onPress={() => {
-                      setTripPlan(null);
-                      AsyncStorage.removeItem("savedTripPlan");
-                    }}
-                    className="bg-red-100 px-3 py-1 rounded"
-                  >
-                    <Text className="text-red-700 text-xs font-rubik-semibold">Clear</Text>
+                        key={day.date}
+                        onPress={() => setSelectedDayIndex(dayIndex)}
+                        className={`mr-2 px-3 py-2 rounded ${
+                          isSelected 
+                            ? 'bg-primary-100' 
+                            : 'bg-gray-100'
+                        }`}
+                      >
+                        <Text className={`font-rubik-medium ${
+                          isSelected ? 'text-white' : 'text-gray-700'
+                        }`}>
+                          Day {dayIndex + 1}
+              </Text>
                   </TouchableOpacity>
-                </View>
+                    );
+                  })}
+                </ScrollView>
               </View>
               
-              {tripPlan.days.map((d: any, dayIndex: number) => {
-                // Get map coordinates for this day
-                const dayMapCoordinates = getMapCoordinates(d.itinerary || []);
-                const dayMapRegion = getMapRegion(dayMapCoordinates, userLocation ?? undefined);
-                const routeCoordinates = dayMapCoordinates.map(coord => ({
-                  latitude: coord.latitude,
-                  longitude: coord.longitude,
-                }));
-                
-                return (
-                  <View key={d.date} className="mb-8">
-                    <View className="bg-gray-100 p-3 rounded-lg mb-4">
-                      <Text className="text-xl font-rubik-bold text-gray-800">
-                        Day {dayIndex + 1}: {d.date}
-                      </Text>
-                      <Text className="text-sm text-gray-600">
-                        {d.itinerary.length} activities planned
-                      </Text>
-                    </View>
-                    
-                    {/* Map showing all stops for this day */}
-                    {dayMapCoordinates.length > 0 && (
-                      <View className="mb-4 rounded-2xl overflow-hidden border border-gray-200 bg-white" style={{ height: 300 }}>
-                        <MapView
-                          style={{ flex: 1 }}
-                          initialRegion={dayMapRegion}
-                          region={dayMapRegion}
-                          showsUserLocation={false}
-                          showsMyLocationButton={false}
-                        >
-                          {/* Route polyline connecting all stops */}
-                          {routeCoordinates.length > 1 && (
-                            <Polyline
-                              coordinates={routeCoordinates}
-                              strokeColor="#0061ff"
-                              strokeWidth={3}
-                              lineDashPattern={[5, 5]}
-                            />
-                          )}
-                          
-                          {/* Markers for each stop */}
-                          {dayMapCoordinates.map((coord, idx) => (
-                            <Marker
-                              key={`${d.date}-${idx}-${coord.latitude}-${coord.longitude}`}
-                              coordinate={{ latitude: coord.latitude, longitude: coord.longitude }}
-                              title={`${idx + 1}. ${coord.title}`}
-                              description={coord.description}
-                              pinColor={idx === 0 ? "#00ff00" : idx === dayMapCoordinates.length - 1 ? "#ff0000" : "#0061ff"}
-                            />
-                          ))}
-                        </MapView>
-                      </View>
-                    )}
+            {/* Selected Day Itinerary */}
+            {tripPlan.days[selectedDayIndex] && (() => {
+              const selectedDay = tripPlan.days[selectedDayIndex];
+              const dayMapCoordinates = getMapCoordinates(selectedDay.itinerary || []);
+              const dayMapRegion = getMapRegion(dayMapCoordinates, userLocation ?? undefined);
+              const routeCoordinates = dayMapCoordinates.map(coord => ({
+                latitude: coord.latitude,
+                longitude: coord.longitude,
+              }));
+
+              // Format date: "2025-11-24" -> "2025 11 24"
+              const formatDate = (dateStr: string) => {
+                return dateStr.replace(/-/g, ' ');
+              };
+
+              return (
+                <View>
+                  {/* Day Header */}
+                  <View className="mb-4">
+                    <Text className="text-xl font-rubik-bold text-gray-800">
+                      Day {selectedDayIndex + 1}
+                    </Text>
+                    <Text className="text-sm text-gray-500 mt-1">
+                      {formatDate(selectedDay.date)}
+                    </Text>
+                  </View>
                   
-                  {d.itinerary.length > 0 ? (
-                    d.itinerary.map((item: any, idx: number) => (
-                      <View key={`${d.date}-${idx}`} className="mb-4 p-4 rounded-lg bg-white border border-gray-200 shadow-sm">
-                        <View className="flex-row items-center justify-between mb-2">
-                          <Text className="text-lg font-rubik-bold text-gray-900 flex-1">
-                            {item.name}
+                  {/* Map showing all stops for this day */}
+                  {dayMapCoordinates.length > 0 && (
+                    <View className="mb-4 rounded-2xl overflow-hidden border border-gray-200 bg-white" style={{ height: 300 }}>
+                      <MapView
+                        style={{ flex: 1 }}
+                        initialRegion={dayMapRegion}
+                        region={dayMapRegion}
+                        showsUserLocation={false}
+                        showsMyLocationButton={false}
+                      >
+                        {/* Route polyline connecting all stops */}
+                        {routeCoordinates.length > 1 && (
+                          <Polyline
+                            coordinates={routeCoordinates}
+                            strokeColor="#0061ff"
+                            strokeWidth={3}
+                            lineDashPattern={[5, 5]}
+                          />
+                        )}
+                        
+                        {/* Markers for each stop */}
+                        {dayMapCoordinates.map((coord, idx) => (
+                          <Marker
+                            key={`${selectedDay.date}-${idx}-${coord.latitude}-${coord.longitude}`}
+                            coordinate={{ latitude: coord.latitude, longitude: coord.longitude }}
+                            title={`${idx + 1}. ${coord.title}`}
+                            description={coord.description}
+                            pinColor={idx === 0 ? "#00ff00" : idx === dayMapCoordinates.length - 1 ? "#ff0000" : "#0061ff"}
+                          />
+                        ))}
+                      </MapView>
+            </View>
+          )}
+
+                  {/* Activities Timeline View */}
+                  {selectedDay.itinerary.length > 0 ? (() => {
+                    // Calculate timeline parameters using user's start time preference
+                    const timelineStart = getTimelineStartTime(selectedDay.itinerary, itineraryStartTime);
+                    const timelineEnd = getTimelineEndTime();
+                    const timelineStartHours = Math.floor(timelineStart / 60);
+                    const timelineEndHours = Math.floor(timelineEnd / 60);
+                    
+                    // Generate time labels for the left bar (every hour)
+                    const timeLabels: number[] = [];
+                    for (let hour = timelineStartHours; hour <= timelineEndHours; hour++) {
+                      timeLabels.push(hour * 60);
+                    }
+                    
+                    // Sort itinerary by start time, preserving original indices
+                    const sortedItinerary = selectedDay.itinerary.map((item: any, idx: number) => ({
+                      ...item,
+                      originalIndex: idx
+                    })).sort((a: any, b: any) => {
+                      return timeToMinutes(a.start_time || "09:00") - timeToMinutes(b.start_time || "09:00");
+                    });
+                    
+                    // Calculate minimum height per hour (in pixels)
+                    const MIN_HEIGHT_PER_HOUR = 80; // Minimum 80px per hour
+                    const totalHours = timelineEndHours - timelineStartHours;
+                    const timelineHeight = Math.max(totalHours * MIN_HEIGHT_PER_HOUR, sortedItinerary.length * 100);
+                    
+                    // Format hour as "9am", "10am", "12pm", "1pm", etc.
+                    const formatHourLabel = (hour: number): string => {
+                      if (hour === 0) return '12am';
+                      if (hour < 12) return `${hour}am`;
+                      if (hour === 12) return '12pm';
+                      return `${hour - 12}pm`;
+                    };
+
+                    // Color coding by category
+                    const getCategoryColor = (category: string | undefined): string => {
+                      const cat = (category || '').toLowerCase();
+                      if (cat.includes('museum') || cat.includes('cultural')) return '#8B5CF6'; // Purple
+                      if (cat.includes('park') || cat.includes('nature') || cat.includes('outdoor') || cat.includes('garden')) return '#10B981'; // Green
+                      if (cat.includes('landmark') || cat.includes('monument') || cat.includes('architecture')) return '#F59E0B'; // Amber
+                      if (cat.includes('theme') || cat.includes('entertainment') || cat.includes('adventure')) return '#EF4444'; // Red
+                      if (cat.includes('beach') || cat.includes('waterfront') || cat.includes('island')) return '#06B6D4'; // Cyan
+                      if (cat.includes('religious') || cat.includes('heritage')) return '#6366F1'; // Indigo
+                      return '#6B7280'; // Default gray
+                    };
+
+                    return (
+                      <View className="flex-row">
+                        {/* Time Bar - Left side (18% width for better spacing to prevent cutoff) */}
+                        <View style={{ width: '18%', position: 'relative', minHeight: timelineHeight }} className="pr-3">
+                          {/* Vertical timeline line */}
+                          <View 
+                            style={{
+                              position: 'absolute',
+                              left: 12,
+                              top: 0,
+                              bottom: 0,
+                              width: 2,
+                              backgroundColor: '#E5E7EB',
+                            }}
+                          />
+                          
+                          {timeLabels.map((timeMinutes) => {
+                            const hour = Math.floor(timeMinutes / 60);
+                            const displayTime = minutesToTime(timeMinutes);
+                            const position = getTimePosition(displayTime, timelineStart, timelineEnd, timelineHeight);
+                            
+                            return (
+                              <View
+                                key={timeMinutes}
+                                style={{
+                                  position: 'absolute',
+                                  top: position - 8, // Adjust to center text on the line
+                                  left: 0,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                }}
+                              >
+                                {/* Hour marker dot */}
+                                <View 
+                                  style={{
+                                    width: 8,
+                                    height: 8,
+                                    borderRadius: 4,
+                                    backgroundColor: '#0B2545',
+                                    marginRight: 6,
+                                  }}
+                                />
+                                <Text className="text-sm text-gray-600 font-rubik-medium" numberOfLines={1}>
+                                  {formatHourLabel(hour)}
                           </Text>
-                          <View className="bg-blue-100 px-2 py-1 rounded">
-                            <Text className="text-xs font-rubik-semibold text-blue-800">
+                  </View>
+                            );
+                          })}
+                        </View>
+                        
+                        {/* Activities Timeline - Right side (82% width) */}
+                        <View style={{ width: '82%', position: 'relative', minHeight: timelineHeight }}>
+                          {/* Vertical connector line down the center */}
+                          <View 
+                            style={{
+                              position: 'absolute',
+                              left: '50%',
+                              top: 0,
+                              bottom: 0,
+                              width: 2,
+                              backgroundColor: '#E5E7EB',
+                              zIndex: 0,
+                              transform: [{ translateX: -1 }], // Center the 2px line
+                            }}
+                          />
+                          
+                          {/* Connecting dots at activity positions */}
+                          {sortedItinerary.map((item: any, idx: number) => {
+                            if (!item.start_time) return null;
+                            const startPos = getTimePosition(item.start_time, timelineStart, timelineEnd, timelineHeight);
+                            const primaryColor = '#0B2545'; // Match Start Tracking button color
+                            
+                            return (
+                              <View
+                                key={`dot-${idx}`}
+                                style={{
+                                  position: 'absolute',
+                                  left: '50%',
+                                  top: startPos - 6,
+                                  width: 12,
+                                  height: 12,
+                                  borderRadius: 6,
+                                  backgroundColor: primaryColor,
+                                  borderWidth: 2,
+                                  borderColor: '#FFFFFF',
+                                  zIndex: 10,
+                                  transform: [{ translateX: -6 }], // Center the dot
+                                }}
+                              />
+                            );
+                          })}
+                          {sortedItinerary.map((item: any, idx: number) => {
+                            if (!item.start_time || !item.end_time) return null;
+                            
+                            const top = getTimePosition(item.start_time, timelineStart, timelineEnd, timelineHeight);
+                            const height = getDurationHeight(item.start_time, item.end_time, timelineStart, timelineEnd, timelineHeight);
+                            const minHeight = 60; // Minimum visible height for each activity (compact view)
+                            const itemKey = `${selectedDay.date}-${item.originalIndex}`;
+                            const isExpanded = expandedActivityCards.has(itemKey);
+                            
+                            // Calculate dynamic spacing to prevent overlaps
+                            let adjustedTop = top;
+                            let previousBottom = 0;
+                            
+                            // Check previous cards to ensure no overlap
+                            for (let prevIdx = 0; prevIdx < idx; prevIdx++) {
+                              const prevItem = sortedItinerary[prevIdx];
+                              if (!prevItem.start_time || !prevItem.end_time) continue;
+                              
+                              const prevTop = getTimePosition(prevItem.start_time, timelineStart, timelineEnd, timelineHeight);
+                              const prevHeight = getDurationHeight(prevItem.start_time, prevItem.end_time, timelineStart, timelineEnd, timelineHeight);
+                              const prevKey = `${selectedDay.date}-${prevItem.originalIndex}`;
+                              const prevExpanded = expandedActivityCards.has(prevKey);
+                              
+                              // Use expanded height if card is expanded, otherwise use minimum
+                              const prevActualHeight = prevExpanded ? Math.max(minHeight, prevHeight) + 8 : minHeight + 8;
+                              const prevBottom = prevTop + prevActualHeight;
+                              
+                              if (prevBottom > previousBottom) {
+                                previousBottom = prevBottom;
+                              }
+                              
+                              // If this card would overlap with previous card, adjust its position
+                              if (top < prevBottom && top > prevTop) {
+                                adjustedTop = prevBottom;
+                              }
+                            }
+                            
+                            return (
+                              <View
+                                key={`${selectedDay.date}-${idx}`}
+                                style={{
+                                  position: 'absolute',
+                                  top: Math.max(0, adjustedTop),
+                                  left: 0,
+                                  right: 0,
+                                  marginBottom: 8, // Add spacing between cards
+                                  minHeight: isExpanded ? Math.max(minHeight, height) : minHeight,
+                                  zIndex: isExpanded ? 100 : (idx + 1),
+                                  elevation: isExpanded ? 10 : (idx + 1), // For Android shadow/elevation
+                                }}
+                              >
+                  <TouchableOpacity
+                    onPress={() => {
+                                    setExpandedActivityCards(prev => {
+                                      const newSet = new Set<string>();
+                                      // Only allow one card expanded at a time
+                                      if (!prev.has(itemKey)) {
+                                        newSet.add(itemKey);
+                                      }
+                                      return newSet;
+                                    });
+                                  }}
+                                  activeOpacity={0.7}
+                                >
+                                  <View 
+                                    className="p-3 rounded-lg bg-white border-2 shadow-sm"
+                                    style={{
+                                      borderLeftWidth: 4,
+                                      borderLeftColor: '#0B2545', // Match Start Tracking button color
+                                    }}
+                                  >
+                                    {/* Place Photo - Always visible by default */}
+                                    {item.photoUrl && (
+                                      <View className="mb-2 rounded-lg overflow-hidden">
+                                        <Image 
+                                          source={{ uri: item.photoUrl }} 
+                                          style={{ width: '100%', height: 80 }} 
+                                          resizeMode="cover"
+                                        />
+                </View>
+                                    )}
+                                    
+                                    {/* Compact View - Always visible */}
+                                    <View className="flex-row items-center justify-between">
+                                      <View className="flex-1">
+                                        {/* Time Display */}
+                                        <Text className="text-sm font-rubik-bold text-primary-100">
                               {item.start_time} - {item.end_time}
                             </Text>
+                                        {/* Activity Name */}
+                                        <Text className="text-base font-rubik-bold text-gray-900" numberOfLines={1}>
+                                          {item.name}
+                            </Text>
                           </View>
+                                      {/* Expand/Collapse Indicator */}
+                                      <Text className="text-xs text-gray-400 ml-2">
+                                        {isExpanded ? '▼' : '▶'}
+                            </Text>
                         </View>
+                                    
+                                    {/* Expanded View - Show details when expanded */}
+                                    {isExpanded && (
+                                      <View className="mt-3">
                         
                         <Text className="text-sm text-gray-600 capitalize mb-1">
                           {item.category ?? "activity"}
                         </Text>
                         
                         {item.estimated_duration != null && (
-                            <Text className="text-sm text-gray-600 mb-1">
+                                          <Text className="text-xs text-gray-500 mb-1">
                               Duration: {typeof item.estimated_duration === "number"
                               ? formatDuration(item.estimated_duration)
                               : item.estimated_duration}
                           </Text>
                         )}
                         
+                                        {/* Transport Information - Collapsible */}
+                                        {(item.travel_time_minutes != null && item.travel_time_minutes > 0) || item.travel_instructions ? (
+                                          <View className="mt-2 mb-1">
+                                            <TouchableOpacity
+                                              onPress={(e) => {
+                                                e.stopPropagation();
+                                                const itemKey = `${selectedDay.date}-${item.originalIndex}`;
+                                                setExpandedTransport(prev => {
+                                                  const newSet = new Set(prev);
+                                                  if (newSet.has(itemKey)) {
+                                                    newSet.delete(itemKey);
+                                                  } else {
+                                                    newSet.add(itemKey);
+                                                  }
+                                                  return newSet;
+                                                });
+                                              }}
+                                              className="flex-row items-center"
+                                            >
+                                              <Text className="text-sm font-rubik-semibold text-gray-700 mr-2">
+                                                Transport
+                                              </Text>
+                                              <Text className="text-xs text-gray-500">
+                                                {expandedTransport.has(`${selectedDay.date}-${item.originalIndex}`) ? '▼' : '▶'}
+                                              </Text>
+                                            </TouchableOpacity>
+                                            
+                                            {expandedTransport.has(`${selectedDay.date}-${item.originalIndex}`) && (
+                                              <View className="mt-2 ml-2 pl-2 border-l-2 border-gray-200">
                         {item.travel_time_minutes != null && item.travel_time_minutes > 0 && (
-                            <Text className="text-sm text-gray-600 mb-1">
+                                                  <Text className="text-xs text-gray-600 mb-1">
                               Transit: {item.travel_time_minutes} min
                           </Text>
                         )}
                         
                         {item.travel_instructions && (
-                            <Text className="text-sm text-gray-500 mb-1">
+                                                  <Text className="text-xs text-gray-600">
                             {item.travel_instructions}
                           </Text>
                         )}
-                        
-                        {item.reason && (
-                          <Text className="text-sm text-gray-500 italic mt-2 p-2 bg-gray-50 rounded">
-                            {item.reason}
-                          </Text>
-                        )}
-
-                        {/* Personalize: Replace action */}
-                        <View className="mt-3 flex-row gap-3">
+                                              </View>
+                                            )}
+                                          </View>
+                                        ) : null}
+                                        
+                                        {/* Extract food suggestions and other reasons */}
+                                        {(() => {
+                                          const reason = item.reason || '';
+                                          const itemKey = `${selectedDay.date}-${item.originalIndex}`;
+                                          
+                                          // Check for food suggestions (Lunch/Dinner)
+                                          const hasFoodSuggestion = /(Lunch|Dinner)\s+suggestion/i.test(reason);
+                                          const foodSuggestionMatch = reason.match(/💡\s*(Lunch|Dinner)\s+suggestion:.*?(?=\n\n|$)/is);
+                                          const foodSuggestion = foodSuggestionMatch ? foodSuggestionMatch[0].replace(/💡\s*/g, '').trim() : null;
+                                          
+                                          // Get non-food reason (everything except food suggestions)
+                                          let otherReason = reason;
+                                          if (foodSuggestionMatch) {
+                                            otherReason = reason.replace(foodSuggestionMatch[0], '').trim();
+                                            // Clean up extra newlines
+                                            otherReason = otherReason.replace(/\n\n+/g, '\n\n').trim();
+                                          }
+                                          
+                                          return (
+                                            <>
+                                              {/* Food Suggestions Button */}
+                                              {hasFoodSuggestion && foodSuggestion && (
+                                                <View className="mt-2 mb-1">
                           <TouchableOpacity
-                            onPress={() => handleReplaceMultiDayItem(dayIndex, idx)}
-                            className="px-3 py-2 rounded bg-primary-100"
-                          >
-                            <Text className="text-white text-xs font-rubik-semibold">Replace</Text>
+                                                    onPress={(e) => {
+                                                      e.stopPropagation();
+                                                      setExpandedFood(prev => {
+                                                        const newSet = new Set(prev);
+                                                        if (newSet.has(itemKey)) {
+                                                          newSet.delete(itemKey);
+                                                        } else {
+                                                          newSet.add(itemKey);
+                                                        }
+                                                        return newSet;
+                                                      });
+                                                    }}
+                                                    className="flex-row items-center"
+                                                  >
+                                                    <Text className="text-sm font-rubik-semibold text-gray-700 mr-2">
+                                                      Food Suggestions
+                          </Text>
+                                                    <Text className="text-xs text-gray-500">
+                                                      {expandedFood.has(itemKey) ? '▼' : '▶'}
+                                                    </Text>
                           </TouchableOpacity>
+                                                  
+                                                  {expandedFood.has(itemKey) && (
+                                                    <View className="mt-2 ml-2 pl-2 border-l-2 border-orange-200">
+                                                      <Text className="text-xs text-gray-600">
+                                                        {foodSuggestion}
+                                                      </Text>
                         </View>
+                                                  )}
                       </View>
-                    ))
-                  ) : (
-                    <View className="p-4 rounded-lg bg-gray-50 border border-gray-200">
-                      <Text className="text-gray-500 text-center font-rubik-semibold">
-                        No activities planned for this day
+                                              )}
+                                              
+                                              {/* Reason Button (for non-food reasons) */}
+                                              {otherReason && (
+                                                <View className="mt-2 mb-1">
+                                                  <TouchableOpacity
+                                                    onPress={(e) => {
+                                                      e.stopPropagation();
+                                                      setExpandedReason(prev => {
+                                                        const newSet = new Set(prev);
+                                                        if (newSet.has(itemKey)) {
+                                                          newSet.delete(itemKey);
+                                                        } else {
+                                                          newSet.add(itemKey);
+                                                        }
+                                                        return newSet;
+                                                      });
+                                                    }}
+                                                    className="flex-row items-center"
+                                                  >
+                                                    <Text className="text-sm font-rubik-semibold text-gray-700 mr-2">
+                                                      Reason
+                                                    </Text>
+                                                    <Text className="text-xs text-gray-500">
+                                                      {expandedReason.has(itemKey) ? '▼' : '▶'}
+                                                    </Text>
+                                                  </TouchableOpacity>
+                                                  
+                                                  {expandedReason.has(itemKey) && (
+                                                    <View className="mt-2 ml-2 pl-2 border-l-2 border-gray-200">
+                                                      <Text className="text-xs text-gray-600 italic">
+                                                        {otherReason}
                       </Text>
                     </View>
                   )}
                 </View>
-                );
-              })}
+                                              )}
+                                            </>
+                                          );
+                                        })()}
 
-              {/* Replacement Suggestions Drawer */}
-              {replaceContext && Array.isArray(replacementSuggestions) && (
-                <View className="mt-2 p-4 rounded-xl bg-white border border-gray-200">
-                  <View className="flex-row justify-between items-center mb-3">
-                    <Text className="text-lg font-rubik-bold text-gray-900">Choose a replacement</Text>
-                    <TouchableOpacity onPress={cancelReplacement} className="px-3 py-2 rounded bg-gray-200">
+                        {/* Personalize: Replace action */}
+                                        <View className="mt-2">
+                          <TouchableOpacity
+                                            onPress={(e) => {
+                                              e.stopPropagation();
+                                              handleReplaceMultiDayItem(selectedDayIndex, item.originalIndex);
+                                            }}
+                                            className="px-3 py-1.5 rounded bg-primary-100 self-start"
+                          >
+                            <Text className="text-white text-xs font-rubik-semibold">Replace</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Replacement Suggestions - Inline in the card */}
+                        {replaceContext && 
+                         replaceContext.dayIndex === selectedDayIndex && 
+                         replaceContext.itemIndex === item.originalIndex && 
+                         Array.isArray(replacementSuggestions) && (
+                          <View className="mt-3 p-3 rounded-xl bg-gray-50 border border-gray-200">
+                            <View className="flex-row justify-between items-center mb-2">
+                              <Text className="text-sm font-rubik-bold text-gray-900">Choose a replacement</Text>
+                              <TouchableOpacity onPress={cancelReplacement} className="px-2 py-1 rounded bg-gray-200">
                       <Text className="text-gray-700 text-xs font-rubik-semibold">Close</Text>
                     </TouchableOpacity>
                   </View>
-                  <View className="flex-row flex-wrap justify-between">
+                            <View className="flex-row flex-wrap justify-between gap-2">
                     {replacementSuggestions.map((p: any) => (
                       <TouchableOpacity
                         key={p.place_id}
-                        onPress={() => applyReplacementSelection(replaceContext.dayIndex, replaceContext.itemIndex, p)}
-                        style={{ width: '48%', marginBottom: 12 }}
-                        className="rounded-xl overflow-hidden border border-gray-200"
+                                  onPress={(e) => {
+                                    e.stopPropagation();
+                                    applyReplacementSelection(replaceContext.dayIndex, replaceContext.itemIndex, p);
+                                  }}
+                                  style={{ width: '48%', marginBottom: 8 }}
+                                  className="rounded-lg overflow-hidden border border-gray-200 bg-white"
                       >
                         {p.photoUrl ? (
                           <View>
-                            <Image source={{ uri: p.photoUrl }} style={{ width: '100%', height: 100 }} resizeMode="cover" />
+                                      <Image source={{ uri: p.photoUrl }} style={{ width: '100%', height: 80 }} resizeMode="cover" />
                           </View>
                         ) : (
-                          <View className="w-full h-24 bg-gray-100 items-center justify-center">
+                                    <View className="w-full h-20 bg-gray-100 items-center justify-center">
                             <Text className="text-gray-500 text-xs">No Image</Text>
                           </View>
                         )}
-                        <View className="p-3 bg-white">
-                          <Text className="font-rubik-semibold text-sm" numberOfLines={2}>{p.name}</Text>
-                          <Text className="text-gray-600 text-xs" numberOfLines={1}>{p.vicinity}</Text>
-                          <Text className="text-gray-600 text-xs mt-1">Rating: {p.rating ?? 'N/A'}</Text>
+                                  <View className="p-2 bg-white">
+                                    <Text className="font-rubik-semibold text-xs" numberOfLines={2}>{p.name}</Text>
+                                    <Text className="text-gray-600 text-xs mt-0.5" numberOfLines={1}>{p.vicinity}</Text>
+                                    {p.rating && (
+                                      <Text className="text-gray-600 text-xs mt-0.5">⭐ {p.rating}</Text>
+                                    )}
                         </View>
                       </TouchableOpacity>
                     ))}
@@ -1454,9 +2114,28 @@ export default function Explore() {
                 </View>
               )}
             </View>
-          ) : null}
-
+          )}
         </View>
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </View>
+                    );
+                  })() : (
+                    <View className="p-4 rounded-lg bg-gray-50 border border-gray-200">
+                      <Text className="text-gray-500 text-center font-rubik-semibold">
+                        No activities planned for this day
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              );
+            })()}
+            </View>
+          )}
+        </>
       </ScrollView>
     </View>
   );

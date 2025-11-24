@@ -661,7 +661,7 @@ export const fetchPlacesByCoordinates = async (
     }
   };
 
-  emitProgress("start", "Preparing nearby places", 0.05);
+  emitProgress("start", "Preparing nearby places", 0);
   const totalStartTime = Date.now();
 
   const DETAILS_TTL_DAYS = 21;
@@ -670,7 +670,7 @@ export const fetchPlacesByCoordinates = async (
   // This saves ~60 seconds and 13 unnecessary API calls.
   let baseItems: any[] = [];
   
-  emitProgress("seed-skipped", "Skipping seed fetch, using AI suggestions only", 0.05);
+  emitProgress("seed-skipped", "Skipping seed fetch, using AI suggestions only", 0.02);
 
   // Start AI shortlist generation immediately (no seed fetch blocking it)
   const shortlistMeta = new Map<string, AISuggestionMeta>();

@@ -58,6 +58,7 @@ export const generateItinerary = async (
     availablePlaces?: string[];
     usedPlaces?: string[];
     anchorPlaces?: string[];
+    weatherForecast?: string | null; // Weather condition if rain expected
   }  
 ) => {
   // Load user prefs (may include { preferences, mustSee, age, height, weight })
@@ -87,12 +88,19 @@ Soft rules:
 - Add generic Lunch and Dinner time blocks (no venue names; 60-90 min each).
 `.trim();
 
+  // Weather-aware planning
+  const weatherNote = opts?.weatherForecast 
+    ? `IMPORTANT: Weather forecast for this day indicates "${opts.weatherForecast}". If rain/storm is expected, prioritize indoor activities (museums, galleries, shopping malls, cafes, restaurants) over outdoor activities (parks, beaches, outdoor markets, hiking). Only include outdoor activities if they are must-see items or if no suitable indoor alternatives exist.`
+    : `Weather: Assume sunny weather. You can include both indoor and outdoor activities.`;
+
   const userPrompt = `
 Plan a **single-day itinerary** using ONLY the places in \`places\`. Do not invent places.
 
 User location (start):
 - lat: ${userCoords.lat}
 - lng: ${userCoords.lng}
+
+${weatherNote}
 
 User profile & preferences JSON (may contain "preferences", "mustSee", age/height/weight):
 ${JSON.stringify(prefs, null, 2)}

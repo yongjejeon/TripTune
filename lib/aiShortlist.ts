@@ -448,7 +448,7 @@ function buildPhase2Prompt(phase1Places: any[], params: FetchParams): string {
     "IMPORTANT:",
     "- Keep places from the provided list that pass the filtering rules in the 'places' array",
     "- List all removed places in the 'rejected' array with the specific reason (which rule number it violated)",
-    "- CRITICAL: If a place is tagged as 'unique experience' but is actually a hospital, clinic, or medical facility (check the name), EXCLUDE it.",
+    "- If a place is tagged as 'unique experience' but is actually a hospital, clinic, or medical facility (check the name), EXCLUDE it.",
     "- Be generous: if a place is borderline but has tourist value, KEEP it",
     "- Only exclude places that clearly violate the rules",
     "- Do NOT add new places not in the original list",
