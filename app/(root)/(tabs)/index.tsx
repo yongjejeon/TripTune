@@ -393,7 +393,7 @@ export default function Index() {
     cityHint?: string,
     tripStart?: DateISO,
     tripEnd?: DateISO,
-    options?: { force?: boolean; bypassSeedCache?: boolean }
+    options?: { force?: boolean }
   ) {
     if (!targetLat || !targetLng) {
       Alert.alert("Error", "No coordinates available. Please detect location first.");
@@ -430,7 +430,6 @@ export default function Index() {
     try {
       t("fetchPlacesByCoordinates");
       const results = await fetchPlacesByCoordinates(targetLat, targetLng, {
-        bypassSeedCache: options?.bypassSeedCache,
         cityName: cityHint || city || undefined,
         tripWindow: {
           start: tripStart || startDate || undefined,
@@ -480,6 +479,14 @@ export default function Index() {
       
       setPlaces(results);
       setLoadingProgress({ value: 1, label: "Recommendations ready!" });
+
+      // Save places to AsyncStorage for reuse in planMultiDayTrip (avoids duplicate fetching)
+      try {
+        await AsyncStorage.setItem("cachedPlaces", JSON.stringify(results));
+        console.log(`Saved ${results.length} places to cache for reuse`);
+      } catch (error) {
+        console.warn("Failed to cache places:", error);
+      }
 
       // Build candidates for selection
       const candidates = buildPreferenceCandidates(results);
@@ -538,16 +545,17 @@ export default function Index() {
       city,
       startDate,
       endDate,
-      { force: true, bypassSeedCache: true }
+      { force: true }
     );
   }
 
   // Auto-load places when location is detected and we're on step 4
-  useEffect(() => {
-    if (coords && onboardStep === 4 && candidates.length === 0) {
-      loadPlaces(coords.lat, coords.lng, city, startDate, endDate);
-    }
-  }, [coords, onboardStep]);
+  // REMOVED: This useEffect was causing duplicate calls. loadPlaces is already called in handleLocationDetected.
+  // useEffect(() => {
+  //   if (coords && onboardStep === 4 && candidates.length === 0) {
+  //     loadPlaces(coords.lat, coords.lng, city, startDate, endDate);
+  //   }
+  // }, [coords, onboardStep]);
 
   // Resolve a typed city to coordinates if needed
   async function resolveCityToCoordsIfNeeded() {

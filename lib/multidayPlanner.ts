@@ -114,9 +114,13 @@ function draftAnchors(days: string[], places: any[], mustIds: Set<string>, maxPe
   return anchors;
 }
 
-export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayProgressUpdate) => void }): Promise<TripPlan> {
+export async function planMultiDayTrip(options?: { 
+  onStatus?: (update: MultiDayProgressUpdate) => void;
+  preloadedPlaces?: any[]; // Optional: pass pre-loaded places to avoid re-fetching
+}): Promise<TripPlan> {
   try {
     console.log("Starting multi-day trip planning...");
+    const totalStartTime = Date.now();
     const emit = (stage: string, message: string, progress?: number, detail?: string) => {
       options?.onStatus?.({ stage, message, progress, detail });
     };
@@ -159,10 +163,39 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
     });
     emit("preferences", `Preferences ready (${prefs.mustSee?.length || 0} must-see selections)`, 0.22);
 
-    emit("places", "Finding top attractions near your stay...", 0.28);
-    const rawPlaces = await fetchPlacesByCoordinates(homebase.lat, homebase.lng);
-    console.log("Places fetched:", rawPlaces.length);
-    emit("places", `Fetched ${rawPlaces.length} places`, 0.34);
+    let rawPlaces: any[];
+    
+    // Try to reuse pre-loaded places (passed directly or cached in AsyncStorage)
+    if (options?.preloadedPlaces && options.preloadedPlaces.length > 0) {
+      // Reuse pre-loaded places passed as parameter
+      console.log(`Reusing ${options.preloadedPlaces.length} pre-loaded places (from parameter)`);
+      rawPlaces = options.preloadedPlaces;
+      emit("places", `Using ${rawPlaces.length} pre-loaded places`, 0.28);
+    } else {
+      // Try to load from AsyncStorage cache first (saved during onboarding)
+      try {
+        const cachedPlacesStr = await AsyncStorage.getItem("cachedPlaces");
+        if (cachedPlacesStr) {
+          const cachedPlaces = JSON.parse(cachedPlacesStr);
+          if (Array.isArray(cachedPlaces) && cachedPlaces.length > 0) {
+            console.log(`Reusing ${cachedPlaces.length} cached places from onboarding (avoiding duplicate fetch)`);
+            rawPlaces = cachedPlaces;
+            emit("places", `Using ${rawPlaces.length} cached places`, 0.28);
+          } else {
+            throw new Error("Cached places array is empty");
+          }
+        } else {
+          throw new Error("No cached places found");
+        }
+      } catch (error) {
+        // Fallback to fetching if cache doesn't exist or is invalid
+        console.log("Cache miss or invalid, fetching places...", error);
+        emit("places", "Finding top attractions near your stay...", 0.28);
+        rawPlaces = await fetchPlacesByCoordinates(homebase.lat, homebase.lng);
+        console.log("Places fetched:", rawPlaces.length);
+        emit("places", `Fetched ${rawPlaces.length} places`, 0.34);
+      }
+    }
 
     if (!rawPlaces || rawPlaces.length === 0) {
       throw new Error("No places found near your location. Please try a different location.");
@@ -279,6 +312,7 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
       try {
         // Generate itinerary for this day using ONLY the available places
         console.log(`Calling AI with ${dayCandidates.length} shortlisted places for day ${date}`);
+        const phase5Start = Date.now();
         const ai = await generateItinerary(dayCandidates, homebase, { 
           date,
           availablePlaces: dayCandidates.map(p => p.name), // Explicitly tell AI which places are available
@@ -291,6 +325,8 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
             return place ? place.name : id;
           }) // Tell AI about the anchor places for this day
         });
+        const phase5Duration = Date.now() - phase5Start;
+        console.log(`⏱️ PHASE 5: Daily Itinerary Generation - Day ${i + 1} (${date}): ${(phase5Duration / 1000).toFixed(2)}s`);
         let rawList: ItinItem[] = ai?.itinerary ?? [];
         
         console.log(`AI returned ${rawList.length} items for day ${date}:`, 
@@ -351,7 +387,10 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
           return item;
         });
 
+        const phase6Start = Date.now();
         const optimized = await reconstructItinerary(homebase, enrichedList, { startTime: itineraryStartTime });
+        const phase6Duration = Date.now() - phase6Start;
+        console.log(`⏱️ PHASE 6: Itinerary Optimization - Day ${i + 1} (${date}): ${(phase6Duration / 1000).toFixed(2)}s`);
 
         // Helper functions
         const timeToMinutes = (timeStr: string): number => {
@@ -672,6 +711,12 @@ export async function planMultiDayTrip(options?: { onStatus?: (update: MultiDayP
       duplicates: duplicates.length
     });
     emit("complete", "Multi-day itinerary ready!", 1);
+    const totalDuration = Date.now() - totalStartTime;
+    console.log(`⏱️ TOTAL: planMultiDayTrip: ${(totalDuration / 1000).toFixed(2)}s`);
+    console.log("✅ Multi-day itinerary generation complete", {
+      days: result.days.length,
+      totalActivities: result.days.reduce((sum, d) => sum + d.itinerary.length, 0)
+    });
     
     return result;
   } catch (error) {

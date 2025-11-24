@@ -8,12 +8,8 @@ import {
 } from "./aiShortlist";
 import { INDOOR_KEYWORDS, OUTDOOR_KEYWORDS } from "./constants";
 import {
-  geoKeyFromLatLng,
   getDetails as getDetailsCache,
-  getSeed,
-  isFresh,
-  setDetails as setDetailsCache,
-  setSeed,
+  setDetails as setDetailsCache
 } from "./localCache";
 import { getUserPreferences } from "./preferences";
 
@@ -24,7 +20,6 @@ export type FetchProgressUpdate = {
 };
 
 export type FetchPlacesOptions = {
-  bypassSeedCache?: boolean;
   cityName?: string;
   countryName?: string;
   tripWindow?: { start?: string; end?: string };
@@ -655,7 +650,7 @@ export const fetchPlacesByCoordinates = async (
 ) => {
   const REQ = Math.floor(Math.random() * 1e6);
   const tag = (s: string) => `[fpc#${REQ}] ${s}`;
-  console.log(tag("start"), { lat, lng, bypass: !!opts?.bypassSeedCache });
+  console.log(tag("start"), { lat, lng });
   console.time(tag("total"));
 
   const prefs = (await getUserPreferences()) || null;
@@ -667,109 +662,17 @@ export const fetchPlacesByCoordinates = async (
   };
 
   emitProgress("start", "Preparing nearby places", 0.05);
+  const totalStartTime = Date.now();
 
-  const SEED_TYPES = [
-    "tourist_attraction",
-    "museum",
-    "art_gallery",
-    "place_of_worship",
-    "palace",
-    "fort",
-    "park",
-    "beach",
-    "aquarium",
-    "zoo",
-    "amusement_park",
-    "stadium",
-    "market",
-  ];
-
-  const SEED_TTL_HOURS = 24;
   const DETAILS_TTL_DAYS = 21;
-  const geokey = geoKeyFromLatLng(lat, lng);
-  const bypass = !!opts?.bypassSeedCache;
+  
+  // REMOVED: Seed fetch - no longer needed. We rely entirely on AI-curated suggestions matched via text search.
+  // This saves ~60 seconds and 13 unnecessary API calls.
+  let baseItems: any[] = [];
+  
+  emitProgress("seed-skipped", "Skipping seed fetch, using AI suggestions only", 0.05);
 
-  let baseItems: any[] | null = null;
-
-  // 1) Seed cache (unless bypass)
-  if (!bypass) {
-    console.time(tag("seed:lookup"));
-    const cachedSeed = await getSeed(geokey);
-    console.timeEnd(tag("seed:lookup"));
-    if (cachedSeed) {
-      const fresh = isFresh(cachedSeed.ts, SEED_TTL_HOURS);
-      console.log(tag("seed.cache"), {
-        items: cachedSeed.items?.length ?? 0,
-        ageMin: Math.round((Date.now() - cachedSeed.ts) / 60000),
-        fresh,
-      });
-      if (fresh) {
-        baseItems = cachedSeed.items;
-        emitProgress("seed-cache", "Using cached nearby places", 0.2);
-        // SWR revalidate
-        (async () => {
-          try {
-            console.time(tag("seed:fetch total"));
-            const fetchedArrays = await Promise.all(
-              SEED_TYPES.map((t) => {
-                const lbl = tag(`seed:type:${t}`);
-                console.time(lbl);
-                return fetchPlacesByType(lat, lng, t).finally(() => console.timeEnd(lbl));
-              })
-            );
-            console.timeEnd(tag("seed:fetch total"));
-
-            console.time(tag("seed:dedupe+filter"));
-            const merged = ([] as any[]).concat(...fetchedArrays);
-            const unique = Array.from(new Map(merged.map((p) => [p.place_id, p])).values());
-            const filtered = unique.filter(isItineraryAttraction);
-            console.timeEnd(tag("seed:dedupe+filter"));
-            console.log(tag("seed:counts"), {
-              merged: merged.length,
-              unique: unique.length,
-              kept: filtered.length,
-            });
-
-            console.time(tag("seed:save"));
-            await setSeed(geokey, filtered);
-            console.timeEnd(tag("seed:save"));
-            emitProgress("seed-refresh", "Background refresh complete", 0.25);
-          } catch {
-            /* ignore background errors */
-          }
-        })();
-      }
-    }
-  }
-
-  // 2) If bypass OR no fresh cache -> fetch now
-  if (!baseItems) {
-    console.time(tag("seed:fetch NOW"));
-    const fetchedArrays = await Promise.all(SEED_TYPES.map((t) => fetchPlacesByType(lat, lng, t)));
-    console.timeEnd(tag("seed:fetch NOW"));
-
-    console.time(tag("seed:dedupe+filter NOW"));
-    const merged = ([] as any[]).concat(...fetchedArrays);
-    const unique = Array.from(new Map(merged.map((p) => [p.place_id, p])).values());
-    const filtered = unique.filter(isItineraryAttraction);
-    console.timeEnd(tag("seed:dedupe+filter NOW"));
-
-    console.time(tag("seed:save NOW"));
-    await setSeed(geokey, filtered);
-    console.timeEnd(tag("seed:save NOW"));
-
-    baseItems = filtered;
-    emitProgress("seed-fetch", "Gathered nearby places", 0.35);
-  }
-
-  if (!baseItems) {
-    baseItems = [];
-  }
-
-  if (baseItems.length) {
-    emitProgress("seed-ready", "Preparing AI shortlist", 0.45);
-  }
-
+  // Start AI shortlist generation immediately (no seed fetch blocking it)
   const shortlistMeta = new Map<string, AISuggestionMeta>();
   let shortlistOrder: Map<string, number> | null = null;
 
@@ -787,39 +690,49 @@ export const fetchPlacesByCoordinates = async (
     opts?.tripWindow?.end ?? "",
   ].join("|");
 
-  const allowCache = !opts?.bypassSeedCache;
+  const allowCache = true; // AI shortlist caching (seed cache is no longer used)
   let aiShortlist: AISuggestion[] = [];
-
-  if (allowCache && aiShortlistCache.has(shortlistKey)) {
-    const cached = aiShortlistCache.get(shortlistKey);
-    const fresh = !!cached && Date.now() - cached.ts < AI_SHORTLIST_CACHE_TTL_MS;
-    if (fresh) {
-      console.log("ai-shortlist: using cached suggestions", { shortlistKey });
-      emitProgress("ai-cache", "Using cached AI shortlist", 0.6);
-      aiShortlist = cached ? cached.suggestions.map((s) => ({ ...s })) : [];
-    } else {
-      aiShortlistCache.delete(shortlistKey);
+  
+  // Start AI shortlist generation immediately (doesn't need to wait for seed fetch)
+  const aiShortlistPromise = (async () => {
+    if (allowCache && aiShortlistCache.has(shortlistKey)) {
+      const cached = aiShortlistCache.get(shortlistKey);
+      const fresh = !!cached && Date.now() - cached.ts < AI_SHORTLIST_CACHE_TTL_MS;
+      if (fresh) {
+        console.log("ai-shortlist: using cached suggestions", { shortlistKey });
+        emitProgress("ai-cache", "Using cached AI shortlist", 0.45);
+        return cached ? cached.suggestions.map((s) => ({ ...s })) : [];
+      } else {
+        aiShortlistCache.delete(shortlistKey);
+      }
     }
-  } else {
-    emitProgress("ai-request", "Asking AI for top sights", 0.55);
-    aiShortlist = await fetchAISuggestions({
+    
+    emitProgress("ai-request", "Asking AI for top sights", 0.45);
+    const phase2Start = Date.now();
+    // OPTIMIZED: Reduced targets for faster, more accurate results
+    const result = await fetchAISuggestions({
       cityName: opts?.cityName,
       countryName: opts?.countryName,
       lat,
       lng,
       tripWindow: opts?.tripWindow,
-      minResults: 30,
-      maxResults: 42,
+      // Use default minResults (30) and maxResults (30) from aiShortlist.ts
     });
+    const phase2Duration = Date.now() - phase2Start;
+    console.log(tag(`⏱️ PHASE 2: AI Shortlist Generation: ${(phase2Duration / 1000).toFixed(2)}s`));
 
-    if (allowCache && aiShortlist.length) {
+    if (allowCache && result.length) {
       aiShortlistCache.set(shortlistKey, {
-        suggestions: aiShortlist.map((s) => ({ ...s })),
+        suggestions: result.map((s) => ({ ...s })),
         ts: Date.now(),
       });
     }
-    emitProgress("ai-response", "Processing AI shortlist", 0.62);
-  }
+    emitProgress("ai-response", "Processing AI shortlist", 0.55);
+    return result;
+        })();
+  
+  // Wait for AI shortlist to complete
+  aiShortlist = await aiShortlistPromise;
 
   if (aiShortlist.length === 0) {
     console.warn("ai-shortlist: no suggestions returned");
@@ -849,15 +762,13 @@ export const fetchPlacesByCoordinates = async (
 
     const seenSuggestionNames = new Set<string>();
     const totalSuggestions = aiShortlist.length || 1;
-    let processedSuggestions = 0;
-
-    for (const suggestion of aiShortlist) {
-      console.log("ai-shortlist: processing suggestion", suggestion);
-
+    
+    // Pre-filter suggestions before text search (fast rejection)
+    const validSuggestions = aiShortlist.filter((suggestion) => {
       const normalizedSuggestionName = normalizeName(suggestion.name);
       if (normalizedSuggestionName && seenSuggestionNames.has(normalizedSuggestionName)) {
         console.log("ai-shortlist: skip duplicate suggestion name", suggestion.name);
-        continue;
+        return false;
       }
 
       if (
@@ -868,67 +779,105 @@ export const fetchPlacesByCoordinates = async (
           name: suggestion.name,
           confidence: suggestion.confidence,
         });
-        continue;
+        return false;
       }
 
       if (normalizedSuggestionName) seenSuggestionNames.add(normalizedSuggestionName);
 
       if (AI_BANNED_NAME_RE.test(suggestion.name)) {
         console.warn("ai-shortlist: rejected by banned-name pattern", suggestion.name);
-        continue;
+        return false;
       }
       if (suggestion.availability === "seasonal_future") {
         console.warn("ai-shortlist: rejected seasonal_future entry", suggestion.name);
-        continue;
+        return false;
       }
 
-      console.log("ai-shortlist: resolving via text search", suggestion.search_name);
-      const textResult = await fetchPlaceByText(suggestion.search_name, lat, lng);
-      if (!textResult) {
-        console.warn("ai-shortlist: unresolved by Google Text Search", suggestion.name);
-        continue;
-      }
+      return true;
+    });
 
-      const key = getPlaceKey(textResult);
-      if (!key) {
-        console.warn("ai-shortlist: missing key after lookup", suggestion.name);
-        continue;
-      }
+    console.log(`ai-shortlist: processing ${validSuggestions.length} valid suggestions (batched)`);
 
-      let distanceKm: number | undefined;
-      const placeLat = textResult?.geometry?.location?.lat;
-      const placeLng = textResult?.geometry?.location?.lng;
-      if (typeof placeLat === "number" && typeof placeLng === "number") {
-        distanceKm = haversineKm(lat, lng, placeLat, placeLng);
-        if (Number.isFinite(distanceKm) && distanceKm > AI_MAX_DISTANCE_KM) {
-          console.warn("ai-shortlist: rejected for distance", {
+    // OPTIMIZATION: Batch text searches in parallel instead of sequential
+    const BATCH_SIZE = 5; // Process 5 text searches at a time
+    let processedSuggestions = 0;
+    
+    const phase3Start = Date.now();
+
+    for (let i = 0; i < validSuggestions.length; i += BATCH_SIZE) {
+      const batch = validSuggestions.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (suggestion) => {
+          console.log("ai-shortlist: resolving via text search", suggestion.search_name);
+          const textResult = await fetchPlaceByText(suggestion.search_name, lat, lng);
+          return { suggestion, textResult };
+        })
+      );
+
+      // Process batch results
+      for (const { suggestion, textResult } of batchResults) {
+        if (!textResult) {
+          console.warn("ai-shortlist: unresolved by Google Text Search", suggestion.name);
+          continue;
+        }
+
+        const key = getPlaceKey(textResult);
+        if (!key) {
+          console.warn("ai-shortlist: missing key after lookup", suggestion.name);
+          continue;
+        }
+
+        let distanceKm: number | undefined;
+        const placeLat = textResult?.geometry?.location?.lat;
+        const placeLng = textResult?.geometry?.location?.lng;
+        if (typeof placeLat === "number" && typeof placeLng === "number") {
+          distanceKm = haversineKm(lat, lng, placeLat, placeLng);
+          if (Number.isFinite(distanceKm) && distanceKm > AI_MAX_DISTANCE_KM) {
+            console.warn("ai-shortlist: rejected for distance", {
+              name: textResult.name,
+              distanceKm: distanceKm.toFixed(1),
+            });
+            continue;
+          }
+        }
+
+        const placeTypes = (textResult.types ?? []).map((t: string) => t?.toLowerCase?.() ?? t) as string[];
+        if (shouldRejectByTypes(placeTypes)) {
+          console.warn("ai-shortlist: rejected by google type", {
             name: textResult.name,
-            distanceKm: distanceKm.toFixed(1),
+            types: placeTypes,
           });
           continue;
         }
-      }
 
-      const placeTypes = (textResult.types ?? []).map((t: string) => t?.toLowerCase?.() ?? t) as string[];
-      if (shouldRejectByTypes(placeTypes)) {
-        console.warn("ai-shortlist: rejected by google type", {
-          name: textResult.name,
-          types: placeTypes,
-        });
-        continue;
-      }
+        if (isRemoteIslandSuggestion(suggestion, textResult, lat, lng)) {
+          console.warn("ai-shortlist: rejected remote island", {
+            name: textResult.name,
+            category: suggestion.category,
+          });
+          continue;
+        }
 
-      if (isRemoteIslandSuggestion(suggestion, textResult, lat, lng)) {
-        console.warn("ai-shortlist: rejected remote island", {
-          name: textResult.name,
-          category: suggestion.category,
-        });
-        continue;
-      }
+        shortlistMeta.set(key, { ...suggestion, distanceKm });
+        if (textResult.place_id && existingById.has(textResult.place_id)) {
+          console.log("ai-shortlist: mapped to existing place", textResult.name, {
+            priority: suggestion.priority,
+          });
+          processedSuggestions += 1;
+          if (processedSuggestions === totalSuggestions || processedSuggestions % 5 === 0) {
+            const progressValue = 0.7 + Math.min(0.15, (processedSuggestions / totalSuggestions) * 0.15);
+            emitProgress(
+              "ai-map",
+              `Matching AI picks (${processedSuggestions}/${totalSuggestions})`,
+              progressValue
+            );
+          }
+          continue;
+        }
 
-      shortlistMeta.set(key, { ...suggestion, distanceKm });
-      if (textResult.place_id && existingById.has(textResult.place_id)) {
-        console.log("ai-shortlist: mapped to existing place", textResult.name, {
+        baseItems.push(textResult);
+        if (textResult.place_id) existingById.set(textResult.place_id, textResult);
+        console.log("ai-shortlist: added new place from text search", textResult.name, {
           priority: suggestion.priority,
         });
         processedSuggestions += 1;
@@ -940,24 +889,11 @@ export const fetchPlacesByCoordinates = async (
             progressValue
           );
         }
-        continue;
-      }
-
-      baseItems.push(textResult);
-      if (textResult.place_id) existingById.set(textResult.place_id, textResult);
-      console.log("ai-shortlist: added new place from text search", textResult.name, {
-        priority: suggestion.priority,
-      });
-      processedSuggestions += 1;
-      if (processedSuggestions === totalSuggestions || processedSuggestions % 5 === 0) {
-        const progressValue = 0.7 + Math.min(0.15, (processedSuggestions / totalSuggestions) * 0.15);
-        emitProgress(
-          "ai-map",
-          `Matching AI picks (${processedSuggestions}/${totalSuggestions})`,
-          progressValue
-        );
       }
     }
+    
+    const phase3Duration = Date.now() - phase3Start;
+    console.log(tag(`⏱️ PHASE 3: Match AI to Google Places (batched): ${(phase3Duration / 1000).toFixed(2)}s`));
 
     if (shortlistMeta.size) {
       shortlistOrder = new Map(
@@ -970,6 +906,7 @@ export const fetchPlacesByCoordinates = async (
   }
 
   emitProgress("details-start", "Fetching detailed info", 0.82);
+  const phase4Start = Date.now();
 
   // 3) Details (use cache, then fill)
   const TOP_FOR_DETAILS = Math.min(60, baseItems.length);
@@ -1012,6 +949,9 @@ export const fetchPlacesByCoordinates = async (
     }
     await new Promise((r) => setTimeout(r, 120));
   }
+  
+  const phase4Duration = Date.now() - phase4Start;
+  console.log(tag(`⏱️ PHASE 4: Place Details Fetch: ${(phase4Duration / 1000).toFixed(2)}s`));
 
   const detailsNull = detailed.filter((d) => !d.details).length;
   console.log("details:nullCount", detailsNull, "of", detailed.length);
@@ -1175,8 +1115,9 @@ export const fetchPlacesByCoordinates = async (
     })
     .filter((p) => !AI_BANNED_NAME_RE.test(p.name ?? ""));
 
-  const shortlistLimit = shortlistOrder?.size ? Math.min(shortlistOrder.size, finalList.length) : finalList.length;
-  finalList = finalList.slice(0, shortlistLimit);
+  // No artificial limit - use all places from the AI shortlist
+  // shortlistOrder.size should match aiShortlist.length, so no need to limit
+  // finalList = finalList.slice(0, shortlistLimit); // REMOVED: Don't artificially limit output
 
   console.log("ai-shortlist: final list ready", finalList.map((p) => ({
     name: p.name,
@@ -1227,7 +1168,9 @@ export const fetchPlacesByCoordinates = async (
       }))
     );
     console.groupEnd();
-    console.timeEnd(tag("total"));
+    const totalDuration = Date.now() - totalStartTime;
+    console.log(tag(`⏱️ TOTAL: fetchPlacesByCoordinates: ${(totalDuration / 1000).toFixed(2)}s`));
+    console.log(tag("✅ Place discovery complete"), { totalPlaces: finalList.length });
   }
 
   return finalList;
