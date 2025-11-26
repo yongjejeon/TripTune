@@ -84,7 +84,7 @@ Hard rules you MUST follow:
 Soft rules:
 - Start near the user's coordinates; keep hops compact (ideally <= 25 min each).
 - Cluster stops by proximity to reduce backtracking.
-- Allocate more time for large museums/parks.
+- Allocate more time for large museums/parks. For amusement parks or theme parks, allocate 5-8 hours (300-480 minutes) as people typically spend a full day there.
 - Add generic Lunch and Dinner time blocks (no venue names; 60-90 min each).
 `.trim();
 
@@ -121,11 +121,14 @@ ${JSON.stringify(mustSee, null, 2)}
        ` : ''}
        ` : ''}
 
-Places (ranked compact list; you may choose any subset of 5-6 stops from these only):
+Places (ranked compact list; you may choose any subset from these only):
 ${JSON.stringify(compactList, null, 2)}
 
        CRITICAL RULES:
-       1) You MUST select 5-6 stops from "places" to create a full day itinerary. Do NOT select fewer than 5 places.
+       1) Select an appropriate number of stops from "places" to create a full day itinerary:
+          - For amusement parks or theme parks: It is acceptable to have just 1 activity (the amusement park) for the entire day, as people typically spend 5-8 hours there.
+          - For other types of places: Aim for 3-4 activities to create a balanced itinerary. You may select fewer if the selected places require longer durations.
+          - IMPORTANT: If an amusement_park or theme_park is selected, allocate 5-8 hours (300-480 minutes) for it, and it's perfectly fine to have only this single activity for the day.
        2) Use the EXACT "name" field from the places list - do NOT use place_id as the name.
        3) Match each chosen stop by exact "place_id" when present, else exact "name".
        4) IMPORTANT: Only select places that are in the "places" list above. Do NOT select any place not explicitly listed.
@@ -139,9 +142,11 @@ ${JSON.stringify(compactList, null, 2)}
           - "travel_time_minutes": integer minutes
           - "travel_instructions": just mode+time (e.g., "Walk ~10 min", "Taxi ~15-20 min", "Bus/Metro ~18-25 min; check Google Maps"). Do NOT invent route numbers.
        10) Do NOT include meal blocks. Instead, add meal suggestions in the "reason" field for activities that overlap with lunch (12:00-14:00) or dinner (18:00-20:00) windows, e.g., "💡 Lunch suggestion: Consider dining at [place name] around 12:30 or at a nearby restaurant during this visit."
-       11) Use integer minutes for "estimated_duration".
+       11) Use integer minutes for "estimated_duration":
+          - For amusement_park or theme_park: Use 300-480 minutes (5-8 hours) - a full day activity.
+          - For other attractions: Use the preferredDuration from the place data, or reasonable defaults (90-180 minutes for museums, 60-120 for landmarks, etc.).
        12) Start around 09:00 local time and end by early evening unless hours force changes.
-       13) IMPORTANT: Create a realistic day itinerary with 3-4 activities (not 5-6). Focus on quality over quantity. Do not create incomplete or overly packed itineraries.
+       13) IMPORTANT: Create a realistic day itinerary. If an amusement park or theme park is included, it's acceptable to have only that single activity for the entire day. For other days, aim for 3-4 activities focusing on quality over quantity.
 
 Output JSON ONLY with this schema:
 

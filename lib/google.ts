@@ -405,7 +405,8 @@ const DEFAULT_TYPE_DURATION: Record<string, number> = {
   beach: 150,
   aquarium: 120,
   zoo: 150,
-  amusement_park: 210,
+  amusement_park: 360, // 6 hours average (typical range: 5-8 hours for a full day)
+  theme_park: 360, // Same as amusement_park - 6 hours average
   stadium: 90,
   market: 75,
   souk: 75,
@@ -425,6 +426,7 @@ const ALLOW_TYPES = new Set<string>([
   "aquarium",
   "zoo",
   "amusement_park",
+  "theme_park",
   "stadium",
   "market",
   "point_of_interest",
@@ -476,6 +478,7 @@ function normalizeCategory(types: string[], name: string): string {
   if (t.has("aquarium")) return "aquarium";
   if (t.has("zoo")) return "zoo";
   if (t.has("amusement_park")) return "amusement_park";
+  if (t.has("theme_park")) return "theme_park"; // Treat theme_park separately but with same duration
   if (t.has("stadium")) return "sports";
   if (t.has("park")) return "park";
   if (t.has("beach")) return "beach";

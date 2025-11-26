@@ -1,7 +1,15 @@
 // screens/Explore.tsx
 import { reconstructItinerary } from "@/lib/itineraryOptimizer";
 import { planMultiDayTrip, type MultiDayProgressUpdate } from "@/lib/multidayPlanner";
-import { regenerateItineraryAfterReplacement, validateReplacement } from "@/lib/personalize";
+import {
+  adjustItineraryForCurrentLocation,
+  allocateTransitionTime,
+  checkPlanForToday,
+  checkUserLocationMismatch,
+  findNearestTouristSite,
+  regenerateItineraryAfterReplacement,
+  validateReplacement,
+} from "@/lib/personalize";
 import { calculateScheduleStatus, generateScheduleAdjustments, saveScheduleAdjustment } from "@/lib/scheduleManager";
 import { checkWeatherForOutdoorActivities } from "@/lib/weatherAware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -183,6 +191,11 @@ export default function Explore() {
   
   // Weather-related state
   const lastWeatherCheckRef = useRef<number>(0);
+  
+  // Location mismatch tracking state
+  const lastLocationMismatchCheckRef = useRef<number>(0);
+  const locationMismatchPromptShownRef = useRef<boolean>(false);
+  
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0); // For UI day selection
   const [itineraryStartTime, setItineraryStartTime] = useState<string | undefined>(undefined);
   const [expandedTransport, setExpandedTransport] = useState<Set<string>>(new Set()); // Track which transport sections are expanded
@@ -263,6 +276,158 @@ export default function Explore() {
       }
     })();
   }, []);
+
+  // ---------------- Location Mismatch Detection and Handling ----------------
+  const checkAndHandleLocationMismatch = useCallback(async (
+    itinerary: any[],
+    currentActivityIndex: number,
+    userLocation: { lat: number; lng: number },
+    dayIndex?: number
+  ) => {
+    // Don't check if prompt was recently shown (within 5 minutes)
+    const timeSinceLastCheck = Date.now() - lastLocationMismatchCheckRef.current;
+    if (locationMismatchPromptShownRef.current && timeSinceLastCheck < 300000) {
+      return; // Don't show again too soon (within 5 minutes)
+    }
+
+    const mismatch = checkUserLocationMismatch(userLocation, itinerary, currentActivityIndex, 500);
+    
+    if (!mismatch.isFar || !mismatch.plannedActivity) {
+      return; // User is at or near planned location
+    }
+
+    // User is far from planned location - prompt them
+    locationMismatchPromptShownRef.current = true;
+    
+    Alert.alert(
+      "Location Mismatch Detected",
+      mismatch.message || `You are far from "${mismatch.plannedActivity.name}". Would you like to allocate more transition time?`,
+      [
+        {
+          text: "Yes, Add Transition Time",
+          onPress: async () => {
+            try {
+              const adjustedItinerary = allocateTransitionTime(
+                itinerary, 
+                currentActivityIndex, 
+                15
+              );
+              
+              // Update the itinerary
+              if (tripPlan && dayIndex !== null && dayIndex !== undefined) {
+                const newPlan = { ...tripPlan };
+                const dayCopy = { ...newPlan.days[dayIndex] };
+                dayCopy.itinerary = adjustedItinerary;
+                newPlan.days = [...newPlan.days];
+                newPlan.days[dayIndex] = dayCopy;
+                setTripPlan(newPlan);
+                await AsyncStorage.setItem("savedTripPlan", JSON.stringify(newPlan));
+                
+                if (dayIndex === selectedDayIndex) {
+                  setOptimizedResult({ itinerary: adjustedItinerary });
+                }
+              } else {
+                if (weatherAdaptedResult) {
+                  setWeatherAdaptedResult({ itinerary: adjustedItinerary });
+                } else {
+                  setOptimizedResult({ itinerary: adjustedItinerary });
+                }
+              }
+              
+              Alert.alert("Schedule Adjusted", "Added 15 minutes transition time and adjusted subsequent activities.");
+            } catch (error) {
+              console.error("Failed to allocate transition time:", error);
+              Alert.alert("Error", "Failed to adjust schedule");
+            }
+          },
+        },
+        {
+          text: "No",
+          style: "cancel",
+          onPress: async () => {
+            // Ask if they want to change schedule based on current location
+            Alert.alert(
+              "Change Schedule?",
+              "Would you like to change the schedule based on your current location? This will add the nearest tourist site as your next destination.",
+              [
+                {
+                  text: "Yes, Change Schedule",
+                  onPress: async () => {
+                    try {
+                      // Get used place IDs to exclude
+                      const usedPlaceIds = new Set<string>();
+                      itinerary.forEach(item => {
+                        if (item.place_id) usedPlaceIds.add(item.place_id);
+                      });
+
+                      // Find nearest tourist site
+                      const nearestSite = await findNearestTouristSite(userLocation, usedPlaceIds, 10);
+                      
+                      if (!nearestSite) {
+                        Alert.alert("No Nearby Sites", "No suitable tourist sites found near your current location.");
+                        return;
+                      }
+
+                      // Get start time
+                      const startTime = await fetchStoredItineraryStart();
+                      
+                      // Adjust itinerary
+                      const adjustedItinerary = await adjustItineraryForCurrentLocation(
+                        itinerary,
+                        currentActivityIndex,
+                        userLocation,
+                        nearestSite,
+                        {
+                          startTime,
+                          userLocation,
+                        }
+                      );
+
+                      // Update the itinerary
+                      if (tripPlan && dayIndex !== null && dayIndex !== undefined) {
+                        const newPlan = { ...tripPlan };
+                        const dayCopy = { ...newPlan.days[dayIndex] };
+                        dayCopy.itinerary = adjustedItinerary;
+                        newPlan.days = [...newPlan.days];
+                        newPlan.days[dayIndex] = dayCopy;
+                        setTripPlan(newPlan);
+                        await AsyncStorage.setItem("savedTripPlan", JSON.stringify(newPlan));
+                        
+                        if (dayIndex === selectedDayIndex) {
+                          setOptimizedResult({ itinerary: adjustedItinerary });
+                        }
+                      } else {
+                        if (weatherAdaptedResult) {
+                          setWeatherAdaptedResult({ itinerary: adjustedItinerary });
+                        } else {
+                          setOptimizedResult({ itinerary: adjustedItinerary });
+                        }
+                      }
+                      
+                      Alert.alert(
+                        "Schedule Updated",
+                        `Added "${nearestSite.name}" to your itinerary based on your current location.`
+                      );
+                    } catch (error) {
+                      console.error("Failed to adjust itinerary for current location:", error);
+                      Alert.alert("Error", "Failed to update schedule based on location");
+                    }
+                  },
+                },
+                {
+                  text: "No, Keep Original",
+                  style: "cancel",
+                  onPress: () => {
+                    console.log("User chose to keep original schedule");
+                  },
+                },
+              ]
+            );
+          },
+        },
+      ]
+    );
+  }, [tripPlan, selectedDayIndex, weatherAdaptedResult, optimizedResult, userLocation]);
 
   // ---------------- Automatic schedule monitoring with location tracking ----------------
   useEffect(() => {
@@ -345,6 +510,14 @@ export default function Explore() {
 
         const nowTs = Date.now();
         const timeSinceLastCheck = nowTs - lastScheduleCheck;
+        
+        // Check for location mismatch (every 2 minutes or when activity changes)
+        const timeSinceLocationCheck = nowTs - lastLocationMismatchCheckRef.current;
+        if (timeSinceLocationCheck > 120000 || newCurrentIdx !== currentActivityIdx) {
+          lastLocationMismatchCheckRef.current = nowTs;
+          checkAndHandleLocationMismatch(todaysItinerary, newCurrentIdx, userLocation, dayIdx);
+        }
+        
         if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
           setLastScheduleCheck(nowTs);
           generateScheduleAdjustments(todaysItinerary, status, userLocation)
@@ -402,6 +575,14 @@ export default function Explore() {
       setScheduleStatus(status);
       const nowTs = Date.now();
       const timeSinceLastCheck = nowTs - lastScheduleCheck;
+      
+      // Check for location mismatch (every 2 minutes or when activity changes)
+      const timeSinceLocationCheck = nowTs - lastLocationMismatchCheckRef.current;
+      if (timeSinceLocationCheck > 120000 || newCurrentIdx !== currentActivityIdx) {
+        lastLocationMismatchCheckRef.current = nowTs;
+        checkAndHandleLocationMismatch(itinerary, newCurrentIdx, userLocation);
+      }
+      
       if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
         setLastScheduleCheck(nowTs);
         generateScheduleAdjustments(itinerary, status, userLocation)
@@ -423,7 +604,7 @@ export default function Explore() {
         // This will be handled by the useEffect below that checks weather periodically
       }
     }
-  }, [isTracking, userLocation, optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, lastScheduleCheck, lastDateNotice, selectedDayIndex, currentActivityIdx]);
+  }, [isTracking, userLocation, optimizedResult, weatherAdaptedResult, tripPlan, currentTripDayIndex, lastScheduleCheck, lastDateNotice, selectedDayIndex, currentActivityIdx, checkAndHandleLocationMismatch]);
 
   // ---------------- Generate / View / Optimize ----------------
   const resetLoadingStatus = useCallback(() => {
@@ -710,6 +891,25 @@ export default function Explore() {
   // ---------------- Tracking (start/stop) ----------------
   const startTracking = useCallback(async () => {
     if (isTracking) return;
+    
+    // Check if there's a plan for today
+    if (tripPlan) {
+      const planCheck = checkPlanForToday(tripPlan);
+      if (!planCheck.hasPlan) {
+        Alert.alert(
+          "No Plan for Today",
+          "There is no trip plan scheduled for today. Please generate a multi-day plan or ensure your trip dates include today."
+        );
+        return;
+      }
+    } else if (!optimizedResult?.itinerary && !weatherAdaptedResult?.itinerary) {
+      Alert.alert(
+        "No Itinerary",
+        "No itinerary available to track. Please generate a plan first."
+      );
+      return;
+    }
+    
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== "granted") {
       Alert.alert("Permission required", "Please enable location permission.");
