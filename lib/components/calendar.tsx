@@ -9,6 +9,7 @@ type Props = {
   initialEnd?: DateISO;
   minDate?: DateISO;
   maxDate?: DateISO;
+  maxTripDays?: number; // Maximum number of days for the trip (default 5)
   onConfirm: (range: { startDate: DateISO; endDate: DateISO; days: DateISO[] }) => void;
   onCancel?: () => void;
 };
@@ -42,6 +43,7 @@ export default function CalendarRangePicker({
   initialEnd,
   minDate,
   maxDate,
+  maxTripDays = 5, // Default to 5 days maximum
   onConfirm,
   onCancel,
 }: Props) {
@@ -50,6 +52,18 @@ export default function CalendarRangePicker({
 
   const valid = !!startDate && !!endDate && startDate <= endDate;
   const lastRangeKey = useRef<string | null>(null);
+
+  // Calculate dynamic maxDate based on startDate + maxTripDays
+  const dynamicMaxDate = useMemo(() => {
+    if (!startDate) return maxDate;
+    const start = parseISOToLocalDate(startDate);
+    const maxEnd = new Date(start);
+    maxEnd.setDate(start.getDate() + maxTripDays - 1); // -1 because start day counts as day 1
+    const calculatedMax = ymd(maxEnd);
+    // Return the earlier of calculated max or prop maxDate
+    if (maxDate && maxDate < calculatedMax) return maxDate;
+    return calculatedMax;
+  }, [startDate, maxDate, maxTripDays]);
 
   const markedDates = useMemo(() => {
     if (!startDate) return {};
@@ -82,18 +96,40 @@ export default function CalendarRangePicker({
 
   const handleDayPress = (day: DateData) => {
     const date = day.dateString; // already "YYYY-MM-DD" in local
+    
     // First tap or reset after complete range
     if (!startDate || (startDate && endDate)) {
       setStartDate(date);
       setEndDate(undefined);
       return;
     }
+    
+    // If user taps the same start date again, cancel the selection
+    if (date === startDate) {
+      setStartDate(undefined);
+      setEndDate(undefined);
+      return;
+    }
+    
     // Second tap
     if (date < startDate) {
+      // If user selects earlier date, make it the new start
       setStartDate(date);
       setEndDate(undefined);
     } else {
-      setEndDate(date);
+      // Check if selected end date is within maxTripDays limit
+      const start = parseISOToLocalDate(startDate);
+      const end = parseISOToLocalDate(date);
+      const daysDiff = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1; // +1 to include both start and end
+      
+      if (daysDiff > maxTripDays) {
+        // If exceeds limit, set end date to maxTripDays from start
+        const maxEnd = new Date(start);
+        maxEnd.setDate(start.getDate() + maxTripDays - 1);
+        setEndDate(ymd(maxEnd));
+      } else {
+        setEndDate(date);
+      }
     }
   };
 
@@ -110,19 +146,26 @@ export default function CalendarRangePicker({
   return (
     <View>
       <Text className="text-2xl font-rubik-bold mt-2 mb-2 text-center">Select Trip Dates</Text>
-      <Text className="text-gray-500 mb-4 text-center">Tap a start day, then an end day.</Text>
+      <View className="mb-4 h-12 justify-center">
+        <Text className="text-gray-500 text-center">
+          {startDate && !endDate 
+            ? `Select an end date (max ${maxTripDays} days) or tap start date again to cancel` 
+            : "Tap a start day, then an end day"}
+        </Text>
+      </View>
 
       <Calendar
         onDayPress={handleDayPress}
         markedDates={markedWithToday}
         markingType="period"
         minDate={minDate}
-        maxDate={maxDate}
+        maxDate={startDate ? dynamicMaxDate : maxDate}
         enableSwipeMonths
         firstDay={1}
         theme={{
           todayTextColor: "#0061ff",
           arrowColor: "#0061ff",
+          textDisabledColor: "#d9e1e8",
         }}
       />
     </View>

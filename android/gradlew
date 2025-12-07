@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Add /usr/local/bin to PATH for NVM node access
+export PATH="/usr/local/bin:$PATH"
+
 #
 # Copyright © 2015-2021 the original authors.
 #

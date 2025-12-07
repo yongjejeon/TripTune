@@ -1,5 +1,6 @@
 import "react-native-get-random-values";
 import { GlobalProvider } from "@/lib/global-provider";
+import { HeartRateProvider } from "@/contexts/HeartRateContext";
 import { useFonts } from "expo-font";
 import { SplashScreen, Stack } from "expo-router";
 import { useEffect } from "react";
@@ -26,7 +27,9 @@ export default function RootLayout() {
 
   return (
     <GlobalProvider>
+      <HeartRateProvider>
         <Stack screenOptions={{headerShown: false}}/>
+      </HeartRateProvider>
     </GlobalProvider>
   );
 }

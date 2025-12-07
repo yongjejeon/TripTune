@@ -21,6 +21,7 @@ import {
 } from "react-native";
 import DateTimePickerModal from "react-native-modal-datetime-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useCustomAlert } from "@/components/CustomAlert";
 
 const PERF = true;
 const t = (label: string) => PERF && console.time(label);
@@ -55,8 +56,23 @@ const formatDateLabel = (value?: string) => {
 };
 
 const parseTimeToDate = (time: string) => {
-  const [hours, minutes] = time.split(":").map((part) => parseInt(part, 10));
   const now = new Date();
+  
+  // Safety check for undefined/null time
+  if (!time || typeof time !== 'string') {
+    console.warn('[Index] Invalid time:', time);
+    now.setHours(9, 0, 0, 0); // Default to 9:00 AM
+    return now;
+  }
+  
+  const parts = time.split(":");
+  if (parts.length !== 2) {
+    console.warn('[Index] Invalid time format:', time);
+    now.setHours(9, 0, 0, 0); // Default to 9:00 AM
+    return now;
+  }
+  
+  const [hours, minutes] = parts.map((part) => parseInt(part, 10));
   now.setHours(Number.isFinite(hours) ? hours : 9, Number.isFinite(minutes) ? minutes : 0, 0, 0);
   return now;
 };
@@ -67,7 +83,18 @@ const formatTimeFromDate = (date: Date) => {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 };
 
+const getTodayDateISO = () => {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
 export default function Index() {
+  // Custom alert
+  const { showAlert, AlertComponent } = useCustomAlert();
+  
   const router = useRouter();
   const [city, setCity] = useState("");
   const [places, setPlaces] = useState<any[]>([]);
@@ -207,13 +234,52 @@ export default function Index() {
             )
           : mustSeeIds.map((id) => ({ place_id: id, name: id }));
 
+        // Check if this is a new trip (different dates or location)
+        const tripContextRaw = await AsyncStorage.getItem("tripContext");
+        if (tripContextRaw) {
+          const savedTrip = JSON.parse(tripContextRaw);
+          const datesChanged = savedTrip.startDate !== startDate || savedTrip.endDate !== endDate;
+          const locationChanged = coords && savedTrip.homebase && (
+            Math.abs(savedTrip.homebase.lat - coords.lat) > 0.1 || 
+            Math.abs(savedTrip.homebase.lng - coords.lng) > 0.1
+          );
+          
+          if (datesChanged || locationChanged) {
+            // New trip detected - ask user if they want to keep old preferences
+            showAlert(
+              "New Trip Detected",
+              "Your dates or location have changed. Would you like to keep your previous place selections or start fresh?",
+              [
+                {
+                  text: "Start Fresh",
+                  onPress: async () => {
+                    await AsyncStorage.removeItem("userPreferences");
+                    await AsyncStorage.removeItem("savedTripPlan");
+                    await AsyncStorage.removeItem("pendingAutoGenerateTripPlan");
+                    setSelectedIds(new Set());
+                    setSavedSelectionSummary([]);
+                  }
+                },
+                {
+                  text: "Keep Selections",
+                  onPress: () => {
+                    setSavedSelectionSummary(storedPlaces);
+                    setSelectedIds(new Set(mustSeeIds));
+                  }
+                }
+              ]
+            );
+            return;
+          }
+        }
+
         setSavedSelectionSummary(storedPlaces);
         setSelectedIds(new Set(mustSeeIds));
       } catch (error) {
         console.warn("Failed to load saved preferences", error);
       }
     })();
-  }, [onboardStep]);
+  }, [onboardStep, startDate, endDate, coords]);
 
   const selectedSummaryList = useMemo(() => {
     const ids = Array.from(selectedIds);
@@ -255,7 +321,7 @@ export default function Index() {
   }
 
   const handleResetPreferences = () => {
-    Alert.alert(
+    showAlert(
       "Reset preferences?",
       "This will clear your saved selections and itinerary plan.",
       [
@@ -270,10 +336,10 @@ export default function Index() {
               await AsyncStorage.removeItem("pendingAutoGenerateTripPlan");
               setSelectedIds(new Set());
               setSavedSelectionSummary([]);
-              Alert.alert("Preferences reset", "Selections cleared. You can choose new places now.");
+              showAlert("Preferences reset", "Selections cleared. You can choose new places now.");
             } catch (error) {
               console.error("Failed to reset preferences:", error);
-              Alert.alert("Error", "Couldn't reset preferences. Please try again.");
+              showAlert("Error", "Couldn't reset preferences. Please try again.");
             }
           },
         },
@@ -291,7 +357,7 @@ export default function Index() {
       
       // 2) Trip dates validation
       if (!startDate || !endDate) {
-        Alert.alert("Trip dates needed", "Please select a start and end date.");
+        showAlert("Trip dates needed", "Please select a start and end date.");
         setOnboardStep(2);
         setSavingPreferences(false);
         return;
@@ -338,11 +404,11 @@ export default function Index() {
 
       setSavedSelectionSummary(selectedSummaries);
 
-      Alert.alert("Preferences saved", "Sit tight, we're building your multi-day itinerary now!");
+      showAlert("Preferences saved", "Sit tight, we're building your multi-day itinerary now!");
       router.replace("/(root)/(tabs)/explore");
     } catch (error) {
       console.error("Failed to save preferences:", error);
-      Alert.alert("Error", "Failed to save preferences. Please try again.");
+      showAlert("Error", "Failed to save preferences. Please try again.");
     } finally {
       setSavingPreferences(false);
     }
@@ -353,7 +419,7 @@ export default function Index() {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== "granted") {
-        Alert.alert("Permission Denied", "Location access is required to detect nearby places.");
+        showAlert("Permission Denied", "Location access is required to detect nearby places.");
         return;
       }
 
@@ -367,7 +433,7 @@ export default function Index() {
       // Reverse geocoding to get city name
       const data = await Location.reverseGeocodeAsync({ latitude, longitude });
       if (!data || data.length === 0) {
-        Alert.alert("Error", "Could not detect city from location");
+        showAlert("Error", "Could not detect city from location");
         return;
       }
 
@@ -385,7 +451,7 @@ export default function Index() {
       await loadPlaces(latitude, longitude, address.city ?? address.region ?? undefined, startDate, endDate);
     } catch (error) {
       console.error("Location detection failed:", error);
-      Alert.alert("Error", "Failed to detect location. Please try again.");
+      showAlert("Error", "Failed to detect location. Please try again.");
     } finally {
       setDetecting(false);
     }
@@ -400,7 +466,7 @@ export default function Index() {
     options?: { force?: boolean }
   ) {
     if (!targetLat || !targetLng) {
-      Alert.alert("Error", "No coordinates available. Please detect location first.");
+      showAlert("Error", "No coordinates available. Please detect location first.");
       return;
     }
 
@@ -525,7 +591,7 @@ export default function Index() {
       return results;
     } catch (error) {
       console.error("Failed to load places:", error);
-      Alert.alert("Error", "Failed to load places. Please try again.");
+      showAlert("Error", "Failed to load places. Please try again.");
     } finally {
       setLoading(false);
       if (activeRequestRef.current === requestSignature) {
@@ -539,7 +605,7 @@ export default function Index() {
 
   async function pullFresh() {
     if (!coords?.lat || !coords?.lng) {
-      Alert.alert("Error", "No coordinates available. Please detect location first.");
+      showAlert("Error", "No coordinates available. Please detect location first.");
       return;
     }
     console.log("Pulling fresh data from Google.");
@@ -613,7 +679,7 @@ export default function Index() {
   const handleManualAddressLookup = useCallback(async () => {
     const input = (city || "").trim();
     if (!input) {
-      Alert.alert("Enter address", "Please type a city or hotel address first.");
+      showAlert("Enter address", "Please type a city or hotel address first.");
       return;
     }
 
@@ -621,7 +687,7 @@ export default function Index() {
     try {
       const geocodeResults = await Location.geocodeAsync(input);
       if (!geocodeResults || !geocodeResults.length) {
-        Alert.alert("Address not found", "We couldn't locate that address. Try refining your search or use the map.");
+        showAlert("Address not found", "We couldn't locate that address. Try refining your search or use the map.");
         return;
       }
 
@@ -634,13 +700,18 @@ export default function Index() {
       if (formatted) {
         setCity(formatted);
       }
+
+      // Auto-load places when location is resolved (if on step 3 about to go to step 4)
+      if (onboardStep === 3) {
+        await loadPlaces(latitude, longitude, formatted || input, startDate, endDate);
+      }
     } catch (error) {
       console.error("Manual location lookup failed", error);
-      Alert.alert("Lookup failed", "Something went wrong while finding that address. Please try again.");
+      showAlert("Lookup failed", "Something went wrong while finding that address. Please try again.");
     } finally {
       setManualLookupLoading(false);
     }
-  }, [city]);
+  }, [city, onboardStep, startDate, endDate]);
 
   // ------- UI -------
   return (
@@ -769,22 +840,22 @@ export default function Index() {
                 
                 // Validation
                 if (!age.trim() || !height.trim() || !weight.trim() || !gender) {
-                  Alert.alert("Missing Information", "Please fill in all fields including age, height, weight, and gender.");
+                  showAlert("Missing Information", "Please fill in all fields including age, height, weight, and gender.");
                   return;
                 }
                 
                 if (isNaN(a) || a < 5 || a > 120) {
-                  Alert.alert("Invalid Age", "Please enter a valid age between 5 and 120 years.");
+                  showAlert("Invalid Age", "Please enter a valid age between 5 and 120 years.");
                   return;
                 }
                 
                 if (isNaN(h) || h < 90 || h > 250) {
-                  Alert.alert("Invalid Height", "Please enter a valid height between 90 and 250 cm.");
+                  showAlert("Invalid Height", "Please enter a valid height between 90 and 250 cm.");
                   return;
                 }
                 
                 if (isNaN(w) || w < 20 || w > 300) {
-                  Alert.alert("Invalid Weight", "Please enter a valid weight between 20 and 300 kg.");
+                  showAlert("Invalid Weight", "Please enter a valid weight between 20 and 300 kg.");
                   return;
                 }
                 
@@ -816,6 +887,8 @@ export default function Index() {
             <CalendarRangePicker
               initialStart={startDate}
               initialEnd={endDate}
+              minDate={getTodayDateISO()}
+              maxTripDays={5}
               onConfirm={(range) => {
                 setStartDate(range.startDate);
                 setEndDate(range.endDate);
@@ -876,11 +949,11 @@ export default function Index() {
               <TouchableOpacity
                 onPress={() => {
                   if (!startDate || !endDate) {
-                    Alert.alert("Select dates", "Please choose a start and end date before continuing.");
+                    showAlert("Select dates", "Please choose a start and end date before continuing.");
                     return;
                   }
                   if (!itineraryStart || itineraryStart.trim() === "") {
-                    Alert.alert("Select Start Time", "Please select a start time for your daily schedule before continuing.");
+                    showAlert("Select Start Time", "Please select a start time for your daily schedule before continuing.");
                     return;
                   }
                   setOnboardStep(3);
@@ -930,14 +1003,6 @@ export default function Index() {
               </View>
             ) : null}
  
-            {/* Option A: Use current location */}
-            <TouchableOpacity
-              onPress={detectLocation}
-              className="bg-primary-100 py-4 px-6 rounded-xl mb-4"
-            >
-              <Text className="text-white text-center font-rubik-bold text-lg">Use My Current Location</Text>
-            </TouchableOpacity>
- 
             <View className="mb-6">
               <Text className="font-rubik-semibold text-gray-700 mb-3">Fine-tune on the map</Text>
               <LocationMapPicker value={coords} onChange={handleMapCoordinateChange} />
@@ -967,12 +1032,14 @@ export default function Index() {
             <View className="mb-6">
               <Text className="font-rubik-semibold mb-2 text-gray-700">Enter city (hotel)</Text>
               <TextInput
-                placeholder="e.g., Abu Dhabi"
+                placeholder="e.g., Abu Dhabi or Seoul"
                 value={city}
                 onChangeText={setCity}
+                onSubmitEditing={handleManualAddressLookup}
+                returnKeyType="search"
                 className="border border-gray-300 rounded-xl px-4 py-4 text-lg"
               />
-              <Text className="text-xs text-gray-500 mt-2">We'll use this as your home base.</Text>
+              <Text className="text-xs text-gray-500 mt-2">Type a city and press Enter to search. We'll use this as your home base.</Text>
               <TouchableOpacity
                 onPress={handleManualAddressLookup}
                 disabled={manualLookupLoading}
@@ -1051,15 +1118,19 @@ export default function Index() {
                     useCoords = await resolveCityToCoordsIfNeeded();
                   }
                   if (!useCoords) {
-                    Alert.alert("Location Required", "Please use current location or enter your city to continue.");
+                    showAlert("Location Required", "Please enter a city or tap on the map to continue.");
                     return;
                   }
                   setOnboardStep(4);
+                  // Load places for step 4 if not already loaded
+                  if (candidates.length === 0) {
+                    await loadPlaces(useCoords.lat, useCoords.lng, city, startDate, endDate);
+                  }
                 }}
-                className={`flex-1 py-4 px-6 rounded-xl ${coords ? "bg-primary-100" : "bg-gray-300"}`}
-                disabled={!coords}
+                className={`flex-1 py-4 px-6 rounded-xl ${(coords || city.trim().length > 0) ? "bg-primary-100" : "bg-gray-300"}`}
+                disabled={!coords && city.trim().length === 0}
               >
-                <Text className={`text-center font-rubik-bold ${coords ? "text-white" : "text-gray-500"}`}>
+                <Text className={`text-center font-rubik-bold ${(coords || city.trim().length > 0) ? "text-white" : "text-gray-500"}`}>
                   Continue
                 </Text>
               </TouchableOpacity>
@@ -1070,7 +1141,17 @@ export default function Index() {
         {/* Step 4: Place Selection */}
         {onboardStep === 4 && (
           <View className="mb-8">
-            <Text className="text-2xl font-rubik-bold mb-2">What looks exciting?</Text>
+            <View className="flex-row justify-between items-center mb-2">
+              <Text className="text-2xl font-rubik-bold">What looks exciting?</Text>
+              {savedSelectionSummary.length > 0 && (
+                <TouchableOpacity
+                  onPress={handleResetPreferences}
+                  className="bg-red-50 border border-red-200 px-3 py-2 rounded-lg"
+                >
+                  <Text className="text-red-600 font-rubik-semibold text-xs">Clear All</Text>
+                </TouchableOpacity>
+              )}
+            </View>
             <Text className="text-gray-600 mb-6">
               Select at least 3 places that interest you. We'll use this to personalize your entire trip!
             </Text>
@@ -1232,7 +1313,7 @@ export default function Index() {
               <TouchableOpacity
                 onPress={() => {
                   if (selectedIds.size < 3) {
-                    Alert.alert("Almost there", "Please select at least 3 places.");
+                    showAlert("Almost there", "Please select at least 3 places.");
                     return;
                   }
                   saveSelectionAndClose();
@@ -1269,7 +1350,7 @@ export default function Index() {
                     .map(([category, pref]) => `${category.replace('_', ' ')} (${pref.weight}/10)`)
                     .join(', ');
                   
-                  Alert.alert(
+                  showAlert(
                     "Smart Analysis", 
                     `Based on your ${selectedIds.size} selections:\n\n${analysis}\n\nWe'll recommend similar places for your trip!`
                   );
@@ -1301,6 +1382,7 @@ export default function Index() {
         )}
 
       </ScrollView>
+      <AlertComponent />
     </SafeAreaView>
   );
 }

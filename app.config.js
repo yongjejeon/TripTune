@@ -2,12 +2,12 @@
 require('dotenv').config({ path: '.env.local' });
 export default {
   expo: {
-    name: "react_native_restate",
-    slug: "react_native_restate",
+    name: "TripTune",
+    slug: "TripTune",
     version: "1.0.0",
     orientation: "portrait",
-    icon: "./assets/images/icon.png",
-    scheme: "reactnativerestate",
+    icon: "./assets/images/triptune.png",
+    scheme: "triptune",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
     ios: {
@@ -16,7 +16,7 @@ export default {
     },
     android: {
       adaptiveIcon: {
-        foregroundImage: "./assets/images/icon.png",
+        foregroundImage: "./assets/images/triptune.png",
         backgroundColor: "#ffffff",
       },
       edgeToEdgeEnabled: true,

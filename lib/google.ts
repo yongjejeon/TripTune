@@ -1205,4 +1205,38 @@ type AICurationMeta = {
   distanceKm?: number;
 };
 
+// ====== Export function for nearby places ======
+export async function getPlacesNearby(
+  lat: number,
+  lng: number,
+  type: string,
+  radiusMeters: number = 2000
+): Promise<any[]> {
+  try {
+    const results = await fetchPlacesByType(lat, lng, type, radiusMeters, 10);
+    
+    // Transform old API format to new format expected by the rest of the code
+    return results.map((place: any) => ({
+      id: place.place_id,
+      place_id: place.place_id,
+      displayName: place.name,
+      name: place.name,
+      location: {
+        latitude: place.geometry?.location?.lat,
+        longitude: place.geometry?.location?.lng
+      },
+      lat: place.geometry?.location?.lat,
+      lng: place.geometry?.location?.lng,
+      primaryType: place.types?.[0] || type,
+      types: place.types,
+      formattedAddress: place.vicinity || place.formatted_address,
+      vicinity: place.vicinity,
+      rating: place.rating,
+      user_ratings_total: place.user_ratings_total
+    }));
+  } catch (error: any) {
+    console.error(`[Google] Failed to fetch nearby ${type}:`, error.message);
+    return [];
+  }
+}
 

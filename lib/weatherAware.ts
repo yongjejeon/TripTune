@@ -392,6 +392,113 @@ async function saveWeatherContext(weather: WeatherData, location: { lat: number;
 }
 
 /**
+ * Get weather forecast duration for harsh weather conditions
+ * Returns the duration in minutes that harsh weather is expected to last
+ * Returns null if not harsh weather or cannot determine duration
+ */
+export async function getHarshWeatherDuration(
+  lat: number,
+  lon: number
+): Promise<{ durationMinutes: number; durationText: string } | null> {
+  try {
+    const API_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_KEY;
+    if (!API_KEY) {
+      console.error('OpenWeather API key not found');
+      return null;
+    }
+
+    // Get current weather first
+    const currentWeather = await getDetailedWeather(lat, lon);
+    if (!currentWeather || !BAD_WEATHER.includes(currentWeather.condition)) {
+      // Not harsh weather currently
+      return null;
+    }
+
+    // Get forecast
+    const response = await fetch(
+      `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${API_KEY}&units=metric`
+    );
+    
+    if (!response.ok) {
+      console.warn(`Weather forecast API error: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const now = new Date();
+    const currentCondition = currentWeather.condition;
+    
+    // Check forecast items in chronological order
+    // Find when the weather condition changes from harsh to good
+    let harshWeatherEndTime: Date | null = null;
+    
+    for (const item of data.list || []) {
+      const forecastTime = new Date(item.dt * 1000);
+      const forecastCondition = item.weather[0]?.main || 'Clear';
+      
+      // If forecast is in the future and still harsh weather, continue
+      if (forecastTime > now && BAD_WEATHER.includes(forecastCondition)) {
+        continue;
+      }
+      
+      // If forecast shows good weather or is significantly in the future, mark end time
+      if (forecastTime > now && !BAD_WEATHER.includes(forecastCondition)) {
+        harshWeatherEndTime = forecastTime;
+        break;
+      }
+    }
+    
+    // If we never found an end time, check the last forecast
+    // If all forecasts show harsh weather, estimate based on last forecast
+    if (!harshWeatherEndTime && data.list && data.list.length > 0) {
+      const lastForecast = data.list[data.list.length - 1];
+      const lastForecastTime = new Date(lastForecast.dt * 1000);
+      const lastCondition = lastForecast.weather[0]?.main || 'Clear';
+      
+      if (BAD_WEATHER.includes(lastCondition)) {
+        // All forecasts show harsh weather, use last forecast time + buffer
+        harshWeatherEndTime = new Date(lastForecastTime.getTime() + 3 * 60 * 60 * 1000); // +3 hours
+      }
+    }
+    
+    if (!harshWeatherEndTime) {
+      // Could not determine duration, assume 1 hour
+      return {
+        durationMinutes: 60,
+        durationText: "about 1 hour"
+      };
+    }
+    
+    const durationMs = harshWeatherEndTime.getTime() - now.getTime();
+    const durationMinutes = Math.max(1, Math.ceil(durationMs / (1000 * 60)));
+    
+    // Format duration text
+    let durationText: string;
+    if (durationMinutes < 60) {
+      durationText = `${durationMinutes} minute${durationMinutes !== 1 ? 's' : ''}`;
+    } else if (durationMinutes < 120) {
+      durationText = "about 1 hour";
+    } else {
+      const hours = Math.floor(durationMinutes / 60);
+      const mins = durationMinutes % 60;
+      if (mins === 0) {
+        durationText = `about ${hours} hour${hours !== 1 ? 's' : ''}`;
+      } else {
+        durationText = `about ${hours} hour${hours !== 1 ? 's' : ''} and ${mins} minute${mins !== 1 ? 's' : ''}`;
+      }
+    }
+    
+    return {
+      durationMinutes,
+      durationText
+    };
+  } catch (error) {
+    console.error('Failed to get harsh weather duration:', error);
+    return null;
+  }
+}
+
+/**
  * Get saved weather context for fatigue calculations
  */
 export async function getWeatherContext(): Promise<WeatherData | null> {

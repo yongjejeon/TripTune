@@ -4,9 +4,59 @@ import {
   openHealthConnectSettings,
   readRecords,
   requestPermission,
+  getSdkStatus,
+  SdkAvailabilityStatus,
 } from "react-native-health-connect";
+import { Linking, NativeModules, Platform } from "react-native";
   
   let hcReady = false;
+
+  /**
+   * Check if Health Connect SDK is available on this device
+   */
+  export async function checkHealthConnectAvailability(): Promise<{
+    available: boolean;
+    status: string;
+    message: string;
+  }> {
+    try {
+      const status = await getSdkStatus();
+      console.log("[HC] SDK Status:", status);
+      
+      if (status === SdkAvailabilityStatus.SDK_AVAILABLE) {
+        return {
+          available: true,
+          status: "SDK_AVAILABLE",
+          message: "Health Connect is available"
+        };
+      } else if (status === SdkAvailabilityStatus.SDK_UNAVAILABLE) {
+        return {
+          available: false,
+          status: "SDK_UNAVAILABLE",
+          message: "Health Connect is not available on this device"
+        };
+      } else if (status === SdkAvailabilityStatus.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED) {
+        return {
+          available: false,
+          status: "UPDATE_REQUIRED",
+          message: "Health Connect needs to be updated"
+        };
+      } else {
+        return {
+          available: false,
+          status: "UNKNOWN",
+          message: "Unknown Health Connect status"
+        };
+      }
+    } catch (error: any) {
+      console.error("[HC] Failed to check availability:", error);
+      return {
+        available: false,
+        status: "ERROR",
+        message: error.message || "Failed to check Health Connect"
+      };
+    }
+  }
   
   /**
    * Initialize Health Connect and request read permission for HeartRate.
@@ -17,12 +67,41 @@ import {
       console.log("[HC] Already initialized");
       return;
     }
+    
+    // Check if Health Connect is available
+    console.log("[HC] Checking Health Connect availability...");
+    const availability = await checkHealthConnectAvailability();
+    console.log("[HC] Availability:", availability);
+    
+    if (!availability.available) {
+      throw new Error(`Health Connect not available: ${availability.message}`);
+    }
+    
     console.log("[HC] Initializing Health Connect...");
-    await initialize();
+    const isInitialized = await initialize();
+    console.log("[HC] Initialize result:", isInitialized);
+    
     console.log("[HC] Requesting permission: HeartRate (read) ...");
-    await requestPermission([{ accessType: "read", recordType: "HeartRate" }]);
+    const granted = await requestPermission([{ accessType: "read", recordType: "HeartRate" }]);
+    console.log("[HC] Permission result:", JSON.stringify(granted));
+    
+    // requestPermission returns an array of granted permissions
+    // If array is empty or doesn't include HeartRate, permission was denied
+    if (!Array.isArray(granted) || granted.length === 0) {
+      console.error("[HC] Permission DENIED - User needs to grant manually");
+      console.error("[HC] INSTRUCTIONS: Go to Settings → Apps → TripTune → Permissions → Enable 'Physical activity'");
+      throw new Error(
+        "Permission denied. Please grant manually:\n\n" +
+        "1. Open Settings on your phone\n" +
+        "2. Go to Apps → TripTune\n" +
+        "3. Tap Permissions\n" +
+        "4. Enable 'Physical activity' or 'Body sensors'\n\n" +
+        "Then restart TripTune."
+      );
+    }
+    
     hcReady = true;
-    console.log("[HC] Ready");
+    console.log("[HC] Permission GRANTED - Ready");
   }
   
   /**
@@ -35,6 +114,48 @@ import {
     } catch (e) {
       console.log("[HC] Failed to open HC settings:", e);
       throw new Error("Unable to open Health Connect settings");
+    }
+  }
+
+  /**
+   * Open Android app settings for TripTune
+   */
+  export async function openAppSettings() {
+    try {
+      console.log("[HC] Opening app settings...");
+      await Linking.openSettings();
+    } catch (e) {
+      console.error("[HC] Failed to open app settings:", e);
+    }
+  }
+
+  /**
+   * Try to read a single heart rate record to test if permission is granted
+   */
+  export async function testPermission(): Promise<boolean> {
+    try {
+      console.log("[HC] Testing permission by attempting to read data...");
+      const end = new Date();
+      const start = new Date(end.getTime() - 60000); // Last 1 minute
+      
+      await readRecords("HeartRate", {
+        timeRangeFilter: {
+          operator: "between",
+          startTime: start.toISOString(),
+          endTime: end.toISOString(),
+        },
+        pageSize: 1,
+      });
+      
+      console.log("[HC] Permission test PASSED - Can read heart rate");
+      return true;
+    } catch (error: any) {
+      if (error.message && error.message.includes("SecurityException")) {
+        console.log("[HC] Permission test FAILED - SecurityException (no permission)");
+        return false;
+      }
+      console.log("[HC] Permission test FAILED - Other error:", error);
+      return false;
     }
   }
   
@@ -304,6 +425,146 @@ import {
   }
 
   /**
+   * Fast version of readLatestBpm - optimized for frequent polling
+   * Uses smaller time window and returns immediately
+   */
+  export async function readLatestBpmFast(
+    minutesBack = 180 // Increased to 3 hours to handle Samsung Health sync delays
+  ): Promise<{ bpm: number | null; at?: string }> {
+    const end = new Date();
+    const start = new Date(end.getTime() - minutesBack * 60 * 1000);
+  
+    console.log(
+      `[HR] readLatestBpmFast(): Searching ${minutesBack} minutes back`
+    );
+    console.log(
+      `[HR] readLatestBpmFast(): Window ${start.toLocaleString()} -> ${end.toLocaleString()}`
+    );
+    console.log(
+      `[HR] readLatestBpmFast(): Window ISO ${start.toISOString()} -> ${end.toISOString()}`
+    );
+  
+    let latest: { bpm: number; at: string } | null = null;
+  
+    try {
+      const res: any = await readRecords("HeartRate", {
+        timeRangeFilter: {
+          operator: "between",
+          startTime: start.toISOString(),
+          endTime: end.toISOString(),
+        },
+        pageSize: 200, // Increase to handle more records (3 hours)
+        ascending: false, // Get newest first
+      });
+  
+      const records = res?.records ?? [];
+      console.log(`[HR] readLatestBpmFast(): got ${records.length} records`);
+      
+      // Log lastModified times to see when Samsung Health last synced
+      if (records.length > 0) {
+        console.log(`[HR] Record lastModified times (most recent first):`);
+        records.slice(0, 5).forEach((r: any, idx: number) => {
+          const modified = r.metadata?.lastModifiedTime || r.lastModifiedTime;
+          if (modified) {
+            const modTime = new Date(modified);
+            const ageMin = Math.floor((Date.now() - modTime.getTime()) / (1000 * 60));
+            console.log(`  [${idx + 1}] Last synced: ${modTime.toLocaleTimeString()} (${ageMin}m ago) - ${r.samples?.length || 0} samples`);
+          }
+        });
+      }
+  
+      // Collect all samples
+      const allSamples: { bpm: number; at: string }[] = [];
+  
+      for (const rec of records) {
+        const r: any = rec;
+        if (Array.isArray(r.samples) && r.samples.length) {
+          for (const s of r.samples) {
+            allSamples.push({ bpm: s.beatsPerMinute, at: s.time });
+          }
+        } else {
+          const bpm =
+            typeof r.beatsPerMinute === "number" ? r.beatsPerMinute : r.bpm;
+          const at = r.endTime ?? r.startTime;
+          if (typeof bpm === "number" && at) {
+            allSamples.push({ bpm, at });
+          }
+        }
+      }
+
+      // Sort by timestamp descending (newest first)
+      allSamples.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+      
+      // Get the absolute latest
+      if (allSamples.length > 0) {
+        latest = allSamples[0];
+        console.log(`[HR] readLatestBpmFast(): Latest is ${latest.bpm} BPM at ${new Date(latest.at).toLocaleTimeString()}`);
+      } else {
+        console.log(`[HR] readLatestBpmFast(): No samples found`);
+      }
+    } catch (error) {
+      console.error("[HR] readLatestBpmFast() error:", error);
+    }
+  
+    return { bpm: latest?.bpm ?? null, at: latest?.at };
+  }
+
+  /**
+   * Comprehensive health check - tests all aspects of Health Connect integration
+   */
+  export async function runHealthConnectDiagnostics(): Promise<{
+    initialized: boolean;
+    permissionGranted: boolean;
+    dataAvailable: boolean;
+    latestData: { bpm: number | null; at?: string; source: string };
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+    let initialized = false;
+    let permissionGranted = false;
+    let dataAvailable = false;
+    let latestData = { bpm: null, at: undefined, source: "none" };
+
+    try {
+      console.log("[DIAG] Starting Health Connect diagnostics...");
+      
+      // Test 1: Initialization
+      try {
+        await ensureHCReady();
+        initialized = true;
+        permissionGranted = true;
+        console.log("[DIAG] ✅ Health Connect initialized and permissions granted");
+      } catch (e: any) {
+        errors.push(`Initialization failed: ${e.message}`);
+        console.error("[DIAG] ❌ Initialization failed:", e);
+        return { initialized, permissionGranted, dataAvailable, latestData, errors };
+      }
+
+      // Test 2: Data availability
+      try {
+        const result = await findRecentHeartRate();
+        latestData = result;
+        if (result.bpm !== null) {
+          dataAvailable = true;
+          console.log("[DIAG] ✅ Heart rate data found:", result);
+        } else {
+          errors.push("No heart rate data available in Health Connect");
+          console.log("[DIAG] ⚠️ No heart rate data found");
+        }
+      } catch (e: any) {
+        errors.push(`Data read failed: ${e.message}`);
+        console.error("[DIAG] ❌ Data read failed:", e);
+      }
+
+      console.log("[DIAG] Diagnostics complete");
+      return { initialized, permissionGranted, dataAvailable, latestData, errors };
+    } catch (e: any) {
+      errors.push(`Unexpected error: ${e.message}`);
+      return { initialized, permissionGranted, dataAvailable, latestData, errors };
+    }
+  }
+
+  /**
    * Force a heart rate measurement by opening Samsung Health
    */
   export async function triggerHeartRateMeasurement(): Promise<void> {
@@ -321,5 +582,64 @@ import {
     } catch (error) {
       console.error("[HR] Failed to trigger measurement:", error);
     }
+  }
+
+  /**
+   * Trigger Samsung Health to sync with Health Connect
+   * Opens Health Connect settings to force a cache refresh
+   */
+  export async function triggerSamsungHealthSync(): Promise<boolean> {
+    try {
+      console.log("[HR] Triggering Health Connect data refresh...");
+      
+      // Opening Health Connect settings forces it to check for new data
+      await openHealthConnectSettings();
+      console.log("[HR] Health Connect settings opened - this forces a data refresh");
+      console.log("[HR] User should check permissions and return to app");
+      
+      return true;
+    } catch (error: any) {
+      console.error("[HR] Failed to trigger sync:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Force a fresh read by doing multiple queries to bust Health Connect cache
+   */
+  export async function forceFreshRead(): Promise<{ bpm: number | null; at?: string }> {
+    console.log("[HR] Forcing fresh read with cache busting...");
+    
+    // Try multiple read attempts with slightly different windows
+    const attempts = [
+      { minutesBack: 180, label: "3 hours" },
+      { minutesBack: 1440, label: "24 hours" }, // Much wider window
+      { minutesBack: 360, label: "6 hours" },
+    ];
+    
+    let bestResult: { bpm: number | null; at?: string } = { bpm: null };
+    
+    for (const attempt of attempts) {
+      console.log(`[HR] Cache bust attempt: ${attempt.label} window`);
+      const result = await readLatestBpmFast(attempt.minutesBack);
+      
+      // Keep the newest result
+      if (result.bpm !== null && result.at) {
+        if (!bestResult.at || new Date(result.at) > new Date(bestResult.at)) {
+          bestResult = result;
+        }
+      }
+      
+      // Small delay between attempts
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    
+    if (bestResult.bpm) {
+      console.log(`[HR] Cache bust successful: ${bestResult.bpm} BPM at ${new Date(bestResult.at!).toLocaleTimeString()}`);
+    } else {
+      console.log("[HR] Cache bust found no data");
+    }
+    
+    return bestResult;
   }
   

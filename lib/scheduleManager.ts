@@ -52,7 +52,7 @@ export function calculateScheduleStatus(
   const currentActivity = itinerary[currentActivityIndex];
   const nextActivity = itinerary[currentActivityIndex + 1];
   
-  if (!currentActivity) {
+  if (!currentActivity || !currentActivity.end_time) {
     return {
       currentActivityIndex,
       isOnTime: true,
@@ -64,9 +64,9 @@ export function calculateScheduleStatus(
     };
   }
 
-  // Parse current activity end time
+  // Parse current activity end time (with safety check)
   const currentEndTime = parseTimeToDate(currentActivity.end_time, currentTime);
-  const nextStartTime = nextActivity ? parseTimeToDate(nextActivity.start_time, currentTime) : null;
+  const nextStartTime = nextActivity?.start_time ? parseTimeToDate(nextActivity.start_time, currentTime) : null;
   
   // Calculate delay
   const delayMinutes = Math.max(0, Math.floor((currentTime.getTime() - currentEndTime.getTime()) / (1000 * 60)));
@@ -105,25 +105,30 @@ export async function generateScheduleAdjustments(
     return adjustments; // No remaining activities to adjust
   }
 
-  // Adjustment 1: Extend current activity time
+  // Adjustment 1: Extend current activity time and push all subsequent activities
   if (currentActivityIndex < itinerary.length - 1) {
     const currentActivity = itinerary[currentActivityIndex];
-    const nextActivity = itinerary[currentActivityIndex + 1];
-    
     const newItinerary = [...itinerary];
-    const newEndTime = addMinutesToTime(currentActivity.end_time, delayMinutes);
-    const newStartTime = addMinutesToTime(nextActivity.start_time, delayMinutes);
     
+    // Update current activity end time
+    const newEndTime = addMinutesToTime(currentActivity.end_time, delayMinutes);
     newItinerary[currentActivityIndex] = {
       ...currentActivity,
       end_time: newEndTime,
-      estimated_duration: currentActivity.estimated_duration + delayMinutes,
+      estimated_duration: (currentActivity.estimated_duration || 0) + delayMinutes,
     };
     
-    newItinerary[currentActivityIndex + 1] = {
-      ...nextActivity,
-      start_time: newStartTime,
-    };
+    // Push ALL subsequent activities by delayMinutes
+    for (let i = currentActivityIndex + 1; i < newItinerary.length; i++) {
+      const activity = newItinerary[i];
+      if (activity.start_time) {
+        activity.start_time = addMinutesToTime(activity.start_time, delayMinutes);
+      }
+      if (activity.end_time) {
+        activity.end_time = addMinutesToTime(activity.end_time, delayMinutes);
+      }
+      newItinerary[i] = activity;
+    }
 
     adjustments.push({
       type: 'extend_current',
@@ -289,7 +294,19 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
  * Parse time string to Date object
  */
 function parseTimeToDate(timeString: string, baseDate: Date): Date {
-  const [hours, minutes] = timeString.split(':').map(Number);
+  // Safety check for undefined/null timeString
+  if (!timeString || typeof timeString !== 'string') {
+    console.warn('[ScheduleManager] Invalid timeString:', timeString);
+    return new Date(baseDate); // Return baseDate as fallback
+  }
+  
+  const parts = timeString.split(':');
+  if (parts.length !== 2) {
+    console.warn('[ScheduleManager] Invalid time format:', timeString);
+    return new Date(baseDate); // Return baseDate as fallback
+  }
+  
+  const [hours, minutes] = parts.map(Number);
   const date = new Date(baseDate);
   date.setHours(hours, minutes, 0, 0);
   return date;

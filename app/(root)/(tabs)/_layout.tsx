@@ -78,21 +78,40 @@ const TabsLayout = () => {
       <Tabs.Screen
         name="fatigue"
         options={{
-          title: 'fatigue',
+          title: 'Health',
           headerShown: false,
           tabBarIcon: ({ focused }) => (
-            <TabIcon icon={icons.home} focused={focused} title="fatigue" />
+            <TabIcon icon={icons.heart} focused={focused} title="Health" />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="testing"
+        options={{
+          title: 'Testing',
+          headerShown: false,
+          tabBarIcon: ({ focused }) => (
+            <TabIcon icon={icons.filter} focused={focused} title="Testing" />
           ),
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
-          title: 'Profile',
-          headerShown: false,
-          tabBarIcon: ({ focused }) => (
-            <TabIcon icon={icons.person} focused={focused} title="Profile" />
-          ),
+          href: null, // Hide Profile tab
+        }}
+      />
+      {/* Hide test screens */}
+      <Tabs.Screen
+        name="health_test"
+        options={{
+          href: null,
+        }}
+      />
+      <Tabs.Screen
+        name="permission_helper"
+        options={{
+          href: null,
         }}
       />
     </Tabs>
