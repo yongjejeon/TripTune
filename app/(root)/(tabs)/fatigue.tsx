@@ -546,9 +546,9 @@ export default function Health() {
           )}
 
           {/* Actions */}
-          <TouchableOpacity
-            onPress={async () => {
-              try {
+        <TouchableOpacity
+          onPress={async () => {
+            try {
                 const { triggerSamsungHealthSync } = await import("@/lib/health");
                 
                 showAlert(

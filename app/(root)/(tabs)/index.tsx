@@ -8,16 +8,16 @@ import * as Location from "expo-location";
 import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
+    ActivityIndicator,
   Alert,
   Image,
   Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from "react-native";
 import DateTimePickerModal from "react-native-modal-datetime-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -373,7 +373,7 @@ export default function Index() {
           name: place?.name ?? fallback?.name ?? "Selected place",
         };
       });
-
+  
       // 3) Trip context (used by multi-day planner)
       const tripContext = {
         startDate,
@@ -984,7 +984,7 @@ export default function Index() {
             <Text className="text-gray-600 mb-6 text-center">
               Set your accommodation location. We will plan around this home base.
             </Text>
- 
+
             {detecting ? (
               <View className="items-center py-8">
                 <View className="h-3 bg-gray-200 rounded-full overflow-hidden">
@@ -996,7 +996,7 @@ export default function Index() {
                 <Text className="text-gray-600 mt-4">Detecting your location...</Text>
               </View>
             ) : null}
- 
+
             {placesApiKey ? (
               <View className="mb-4">
                 <Text className="font-rubik-semibold text-gray-700 mb-2">Search hotel or address</Text>
@@ -1008,10 +1008,10 @@ export default function Index() {
               <LocationMapPicker value={coords} onChange={handleMapCoordinateChange} />
               <View className="flex-row justify-between items-center mt-3">
                 <Text className="text-xs text-gray-500">Tap to drop a pin or drag the marker to your hotel.</Text>
-                {coords && (
+            {coords && (
                   <Text className="text-xs font-rubik-semibold text-gray-600">
                     {coords.lat.toFixed(4)}, {coords.lng.toFixed(4)}
-                  </Text>
+                </Text>
                 )}
               </View>
               {mapRefining && (
@@ -1027,7 +1027,7 @@ export default function Index() {
                 </Text>
               </View>
             ) : null}
- 
+
             {/* Option B: Enter city manually */}
             <View className="mb-6">
               <Text className="font-rubik-semibold mb-2 text-gray-700">Enter city (hotel)</Text>
@@ -1103,7 +1103,7 @@ export default function Index() {
                 </TouchableOpacity>
               </View>
             </View>
- 
+
             <View className="flex-row gap-4">
               <TouchableOpacity
                 onPress={() => setOnboardStep(2)}
@@ -1269,8 +1269,8 @@ export default function Index() {
                         </Text>
                         <Text className="text-gray-600 text-xs mt-1">
                           Rating: {p.rating?.toFixed(1) || "N/A"}
-                        </Text>
-                      </View>
+                          </Text>
+                        </View>
                     </Pressable>
                   );
                 })}

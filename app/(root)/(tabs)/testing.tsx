@@ -508,8 +508,171 @@ export default function Testing() {
             <TouchableOpacity
               onPress={async () => {
                 try {
+                  // Set time to 10:00 AM
+                  const now = new Date();
+                  now.setHours(10, 0, 0, 0); // 10:00 AM
+                  
+                  await AsyncStorage.setItem(
+                    "testTimeOverride",
+                    JSON.stringify({ timestamp: now.toISOString() })
+                  );
+                  
+                  showAlert(
+                    "Time Set",
+                    `Time set to 10:00 AM for testing early completion detection`
+                  );
+                  loadCurrentStates();
+                } catch (error: any) {
+                  showAlert("Error", error.message);
+                }
+              }}
+              className="bg-blue-100 rounded-2xl p-4 mb-3 border border-blue-300"
+            >
+              <Text className="text-center font-rubik-bold text-blue-800">
+                Set Time to 10:00 AM
+              </Text>
+              <Text className="text-center text-xs text-blue-700 font-rubik mt-1">
+                Sets time to 10am for testing early completion detection
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              onPress={async () => {
+                try {
+                  // Set time to 1:00 PM
+                  const now = new Date();
+                  now.setHours(13, 0, 0, 0); // 1:00 PM
+                  
+                  await AsyncStorage.setItem(
+                    "testTimeOverride",
+                    JSON.stringify({ timestamp: now.toISOString() })
+                  );
+                  
+                  showAlert(
+                    "Time Set",
+                    "Time set to 1:00 PM for testing location mismatch detection"
+                  );
+                } catch (error: any) {
+                  showAlert("Error", error.message);
+                }
+              }}
+              className="bg-purple-100 rounded-2xl p-4 mb-3 border border-purple-300"
+            >
+              <Text className="text-center font-rubik-bold text-purple-800">
+                Set Time to 1:00 PM
+              </Text>
+              <Text className="text-center text-xs text-purple-700 font-rubik mt-1">
+                Sets time to 1pm to test location mismatch detection
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={async () => {
+                try {
+                  // Load trip plan to get first activity's end time
+                  const savedPlan = await AsyncStorage.getItem("savedTripPlan");
+                  if (!savedPlan) {
+                    showAlert("Error", "No trip plan found. Please generate a plan first.");
+                    return;
+                  }
+                  
+                  const tripPlan = JSON.parse(savedPlan);
+                  const firstDay = tripPlan.days?.[0];
+                  if (!firstDay || !firstDay.itinerary || firstDay.itinerary.length === 0) {
+                    showAlert("Error", "No activities found in the trip plan.");
+                    return;
+                  }
+                  
+                  const firstActivity = firstDay.itinerary[0];
+                  if (!firstActivity.end_time) {
+                    showAlert("Error", "First activity doesn't have an end time.");
+                    return;
+                  }
+                  
+                  // Check if there's a second activity
+                  const secondActivity = firstDay.itinerary[1];
+                  if (!secondActivity || !secondActivity.start_time) {
+                    showAlert("Error", "No second activity found. Cannot test late detection.");
+                    return;
+                  }
+                  
+                  // Parse the end_time (format: "HH:MM")
+                  const [endHoursStr, endMinutesStr] = firstActivity.end_time.split(':');
+                  const endHours = parseInt(endHoursStr, 10);
+                  const endMinutes = parseInt(endMinutesStr, 10);
+                  
+                  // Parse the second activity's start_time
+                  const [startHoursStr, startMinutesStr] = secondActivity.start_time.split(':');
+                  const startHours = parseInt(startHoursStr, 10);
+                  const startMinutes = parseInt(startMinutesStr, 10);
+                  
+                  if (isNaN(endHours) || isNaN(endMinutes) || isNaN(startHours) || isNaN(startMinutes)) {
+                    showAlert("Error", "Invalid time format.");
+                    return;
+                  }
+                  
+                  // Get transition time (travel_time_minutes from second activity, or calculate from time difference)
+                  let transitionTime = secondActivity.travel_time_minutes || 0;
+                  if (transitionTime === 0) {
+                    // Calculate transition time from time difference
+                    const endTimeMinutes = endHours * 60 + endMinutes;
+                    const startTimeMinutes = startHours * 60 + startMinutes;
+                    transitionTime = startTimeMinutes - endTimeMinutes;
+                    if (transitionTime < 0) transitionTime += 24 * 60; // Handle next day
+                  }
+                  
+                  // Set time to be late for the next activity
+                  // End time + transition time + 30 minutes late
+                  const now = new Date();
+                  now.setHours(endHours, endMinutes, 0, 0);
+                  
+                  // Add transition time + 30 minutes to be actually late
+                  const totalMinutesToAdd = transitionTime + 30;
+                  now.setMinutes(now.getMinutes() + totalMinutesToAdd);
+                  
+                  await AsyncStorage.setItem(
+                    "testTimeOverride",
+                    JSON.stringify({ timestamp: now.toISOString() })
+                  );
+                  
+                  const finalHours = now.getHours();
+                  const finalMinutes = now.getMinutes();
+                  const ampm = finalHours >= 12 ? 'PM' : 'AM';
+                  const displayHours = finalHours % 12 || 12;
+                  const displayTime = `${displayHours}:${String(finalMinutes).padStart(2, '0')} ${ampm}`;
+                  
+                  showAlert(
+                    "Time Set",
+                    `Time set to ${displayTime}\n\n` +
+                    `First activity ends: ${firstActivity.end_time}\n` +
+                    `Transition time: ${transitionTime} min\n` +
+                    `Second activity starts: ${secondActivity.start_time}\n` +
+                    `Set time is ${30} min late for next activity`
+                  );
+                  
+                  // Reload to update display
+                  loadCurrentStates();
+                } catch (error: any) {
+                  console.error("Error setting time to first activity end:", error);
+                  showAlert("Error", error.message || "Failed to set time");
+                }
+              }}
+              className="bg-teal-100 rounded-2xl p-4 mb-3 border border-teal-300"
+            >
+              <Text className="text-center font-rubik-bold text-teal-800">
+                Set Time to First Activity's End Time
+              </Text>
+              <Text className="text-center text-xs text-teal-700 font-rubik mt-1">
+                Sets time to when first activity should end (for testing late detection)
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={async () => {
+                try {
                   await AsyncStorage.removeItem("testTimeOverride");
                   showAlert("Override Cleared", "Using real system time now");
+                  loadCurrentStates();
                 } catch (error: any) {
                   showAlert("Error", error.message);
                 }

@@ -10,7 +10,7 @@ import {
   regenerateItineraryAfterReplacement,
   validateReplacement,
 } from "@/lib/personalize";
-import { calculateScheduleStatus, generateScheduleAdjustments, saveScheduleAdjustment } from "@/lib/scheduleManager";
+import { calculateScheduleStatus, generateScheduleAdjustments, saveScheduleAdjustment, parseTimeToDate } from "@/lib/scheduleManager";
 import { checkWeatherForOutdoorActivities, BAD_WEATHER } from "@/lib/weatherAware";
 import { calculateRestRecoveryByType, type UserProfile } from "@/lib/fatigueCalculator";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -986,10 +986,19 @@ export default function Explore() {
       }
       
       // Check if user completed early and adjust schedule
-      if (!wasSkipped && existingStatus?.arrivedAt && existingStatus?.expectedDuration) {
-        const timeSaved = existingStatus.expectedDuration - (existingStatus.durationMinutes || 0);
-        if (timeSaved > 5) { // If saved more than 5 minutes
-          adjustScheduleForEarlyCompletion(activityIndex, timeSaved);
+      if (!wasSkipped) {
+        const currentTime = await getCurrentTime();
+        const activityEndTime = activity.end_time ? parseTimeToDate(activity.end_time, currentTime) : null;
+        const completedTime = new Date();
+        
+        if (activityEndTime && completedTime < activityEndTime) {
+          // User completed early - reschedule subsequent activities
+          const minutesEarly = Math.round((activityEndTime.getTime() - completedTime.getTime()) / 60000);
+          console.log(`[Early Completion] Activity completed ${minutesEarly} minutes early`);
+          
+          if (minutesEarly > 5) {
+            await adjustScheduleForEarlyCompletion(activityIndex, completedTime);
+          }
         }
       }
       
@@ -1012,61 +1021,178 @@ export default function Explore() {
   };
 
   // Adjust schedule when user completes activity early
-  const adjustScheduleForEarlyCompletion = async (completedActivityIndex: number, minutesSaved: number) => {
+  const adjustScheduleForEarlyCompletion = async (completedActivityIndex: number, completedAt: Date) => {
     if (!tripPlan || currentTripDayIndex === null) return;
     
     try {
-      console.log(`[Schedule] Activity ${completedActivityIndex} completed ${minutesSaved} minutes early`);
+      const todayItinerary = tripPlan.days[currentTripDayIndex]?.itinerary || [];
+      if (completedActivityIndex >= todayItinerary.length - 1) {
+        // No more activities to reschedule
+        return;
+      }
+      
+      const completedActivity = todayItinerary[completedActivityIndex];
+      if (!completedActivity?.end_time) {
+        console.error(`[Early Completion] Completed activity ${completedActivityIndex} has no end_time`);
+        return;
+      }
+      
+      // Check if subsequent activities have already been rescheduled (prevent duplicate rescheduling)
+      const nextActivity = todayItinerary[completedActivityIndex + 1];
+      if (nextActivity?.rescheduledEarly) {
+        console.log(`[Early Completion] Activities have already been rescheduled for early completion, skipping duplicate reschedule`);
+        return;
+      }
+      
+      // Calculate how many minutes early the user finished
+      // Use completedAt as the base for parsing to ensure consistent time reference
+      const scheduledEndTime = parseTimeToDate(completedActivity.end_time, completedAt);
+      const minutesEarly = Math.round((scheduledEndTime.getTime() - completedAt.getTime()) / 60000);
+      
+      console.log(`[Early Completion] ===== RESCHEDULING ACTIVITIES =====`);
+      console.log(`[Early Completion] Activity ${completedActivityIndex} (${completedActivity.name})`);
+      console.log(`[Early Completion] Scheduled end time string: "${completedActivity.end_time}"`);
+      console.log(`[Early Completion] Scheduled end time parsed: ${scheduledEndTime.toISOString()} (${scheduledEndTime.toLocaleTimeString()})`);
+      console.log(`[Early Completion] Actual completion time: ${completedAt.toISOString()} (${completedAt.toLocaleTimeString()})`);
+      console.log(`[Early Completion] Minutes early: ${minutesEarly}`);
+      console.log(`[Early Completion] Will subtract ${minutesEarly} minutes from all subsequent activities`);
+      
+      // Validate minutesEarly makes sense (should be positive and reasonable)
+      if (minutesEarly <= 0 || minutesEarly > 24 * 60) {
+        console.error(`[Early Completion] Invalid minutesEarly: ${minutesEarly}. Scheduled: ${completedActivity.end_time}, Completed: ${completedAt.toISOString()}`);
+        return;
+      }
+      
+      if (minutesEarly <= 0) {
+        console.log(`[Early Completion] No time saved, skipping rescheduling`);
+        return;
+      }
+      
+      // Helper to subtract minutes from a time string
+      // For schedule rescheduling, we never want to roll over to previous day
+      const subtractMinutesFromTime = (timeStr: string, minutes: number): string => {
+        if (!timeStr) return timeStr;
+        const [h, m] = timeStr.split(':').map(Number);
+        
+        if (isNaN(h) || isNaN(m)) {
+          console.warn(`[Early Completion] Invalid time format: ${timeStr}`);
+          return timeStr;
+        }
+        
+        const totalMinutes = h * 60 + m - minutes;
+        
+        // For schedule rescheduling, we should never go negative (activities should always move earlier in the same day)
+        // If it would go negative, clamp to 00:00 (start of day)
+        const adjustedMinutes = Math.max(0, totalMinutes);
+        
+        const newH = Math.floor(adjustedMinutes / 60);
+        const newM = adjustedMinutes % 60;
+        
+        // Ensure we don't exceed 23:59
+        const finalH = Math.min(newH, 23);
+        const finalM = finalH === 23 ? Math.min(newM, 59) : newM;
+        
+        const result = `${String(finalH).padStart(2, '0')}:${String(finalM).padStart(2, '0')}`;
+        console.log(`[Early Completion] subtractMinutesFromTime: ${timeStr} - ${minutes} min = ${result}`);
+        return result;
+      };
+      
+      // Reschedule all subsequent activities by subtracting minutesEarly from their times
+      const newItinerary = [...todayItinerary];
+      
+      console.log(`[Early Completion] Subtracting ${minutesEarly} minutes from all subsequent activities`);
+      
+      for (let i = completedActivityIndex + 1; i < newItinerary.length; i++) {
+        const activity = newItinerary[i];
+        const oldStartTime = activity.start_time;
+        const oldEndTime = activity.end_time;
+        
+        if (!oldStartTime || !oldEndTime) {
+          console.warn(`[Early Completion] Activity ${i} (${activity.name}) missing start_time or end_time, skipping`);
+          continue;
+        }
+        
+        // Log original times in detail
+        console.log(`[Early Completion] ===== Processing Activity ${i} (${activity.name}) =====`);
+        console.log(`[Early Completion] Original start_time: "${oldStartTime}"`);
+        console.log(`[Early Completion] Original end_time: "${oldEndTime}"`);
+        
+        // Subtract minutesEarly from both start and end times
+        const newStartTime = subtractMinutesFromTime(oldStartTime, minutesEarly);
+        const newEndTime = subtractMinutesFromTime(oldEndTime, minutesEarly);
+        
+        console.log(`[Early Completion] Result start_time: "${newStartTime}" (subtracted ${minutesEarly} min from "${oldStartTime}")`);
+        console.log(`[Early Completion] Result end_time: "${newEndTime}" (subtracted ${minutesEarly} min from "${oldEndTime}")`);
+        
+        // Validate: new times should be earlier than old times (or equal at minimum)
+        const oldStartMins = timeToMinutes(oldStartTime);
+        const newStartMins = timeToMinutes(newStartTime);
+        const oldEndMins = timeToMinutes(oldEndTime);
+        const newEndMins = timeToMinutes(newEndTime);
+        
+        if (newStartMins > oldStartMins || newEndMins > oldEndMins) {
+          console.error(`[Early Completion] ERROR: New times are not earlier! Old start: ${oldStartMins} min, New start: ${newStartMins} min`);
+          console.error(`[Early Completion] This should not happen. Skipping reschedule for activity ${i}`);
+          return; // Don't reschedule if calculation is wrong
+        }
+        
+        // Preserve all other properties including travel_time_minutes
+        newItinerary[i] = {
+          ...activity,
+          start_time: newStartTime,
+          end_time: newEndTime,
+          rescheduledEarly: true,
+        };
+      }
+      
+      console.log(`[Early Completion] ===== RESCHEDULING COMPLETE =====`);
+      
+      // Update trip plan
+      const updatedPlan = { ...tripPlan };
+      updatedPlan.days[currentTripDayIndex].itinerary = newItinerary;
+      setTripPlan(updatedPlan);
+      await AsyncStorage.setItem("savedTripPlan", JSON.stringify(updatedPlan));
+      
+      // Update optimized result if viewing this day
+      if (selectedDayIndex === currentTripDayIndex) {
+        setOptimizedResult({ itinerary: newItinerary });
+      }
+      
+      // Update weather adapted result if it exists
+      if (weatherAdaptedResult && selectedDayIndex === currentTripDayIndex) {
+        setWeatherAdaptedResult({ itinerary: newItinerary });
+      }
+      
+      // Move to next activity index if applicable
+      const nextActivityIndex = completedActivityIndex + 1;
+      if (nextActivityIndex < newItinerary.length) {
+        console.log(`[Early Completion] Moving to next activity index: ${nextActivityIndex}`);
+        setCurrentActivityIdx(nextActivityIndex);
+        
+        // Recalculate schedule status with new times to prevent false "behind schedule" alerts
+        const currentTime = await getCurrentTime();
+        const newStatus = calculateScheduleStatus(newItinerary, nextActivityIndex, currentTime);
+        console.log(`[Early Completion] New schedule status after rescheduling:`, {
+          isBehindSchedule: newStatus.isBehindSchedule,
+          delayMinutes: newStatus.delayMinutes,
+          currentActivityIndex: newStatus.currentActivityIndex
+        });
+        setScheduleStatus(newStatus);
+        
+        // Reset last schedule check to prevent immediate re-triggering
+        setLastScheduleCheck(Date.now());
+        // Track early rescheduling to prevent schedule adjustment alerts for 60 seconds
+        lastEarlyRescheduleRef.current = Date.now();
+        console.log(`[Early Completion] Reset lastScheduleCheck and set early reschedule flag to prevent immediate schedule adjustment alerts`);
+      }
       
       showAlert(
-        "Ahead of Schedule!",
-        `You finished ${minutesSaved} minutes early. Would you like to start your next activity now?`,
-        [
-          {
-            text: "Wait (stick to schedule)",
-            style: "cancel",
-            onPress: () => {
-              console.log("[Schedule] User chose to wait");
-            }
-          },
-          {
-            text: "Start Next Activity",
-            onPress: async () => {
-              // Move to next activity immediately
-              const nextIndex = completedActivityIndex + 1;
-              const todayItinerary = tripPlan.days[currentTripDayIndex]?.itinerary || [];
-              
-              if (nextIndex < todayItinerary.length) {
-                setCurrentActivityIdx(nextIndex);
-                
-                // Update status for next activity
-                const updatedStatuses = [...activityStatuses];
-                const nextStatus = updatedStatuses.find(s => s.activityIndex === nextIndex);
-                
-                if (nextStatus) {
-                  nextStatus.arrivedAt = new Date().toISOString();
-                  nextStatus.status = 'in-progress';
-                } else {
-                  updatedStatuses.push({
-                    activityIndex: nextIndex,
-                    status: 'in-progress',
-                    arrivedAt: new Date().toISOString()
-                  });
-                }
-                
-                await saveActivityStatuses(updatedStatuses);
-                
-                showAlert(
-                  "Schedule Updated",
-                  `Starting "${todayItinerary[nextIndex].name}" now. Enjoy!`
-                );
-              }
-            }
-          }
-        ]
+        "Schedule Adjusted",
+        "Your remaining activities have been rescheduled to start earlier based on your early completion!",
+        [{ text: "Great!" }]
       );
     } catch (error: any) {
-      console.error("Failed to adjust schedule:", error);
+      console.error("[Early Completion] Failed to adjust schedule:", error);
     }
   };
   
@@ -1076,6 +1202,12 @@ export default function Explore() {
   // Location mismatch tracking state
   const lastLocationMismatchCheckRef = useRef<number>(0);
   const locationMismatchPromptShownRef = useRef<boolean>(false);
+  
+  // Schedule adjustment alert tracking state
+  const scheduleAdjustmentAlertShowingRef = useRef<boolean>(false);
+  const lastEarlyRescheduleRef = useRef<number>(0); // Track when early rescheduling happened
+  const lastScheduleAdjustmentRef = useRef<number>(0); // Track when schedule adjustment was applied
+  const earlyCompletionPromptShownRef = useRef<{ [key: number]: number }>({}); // Track which activities have been prompted for early completion
   
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0); // For UI day selection
   const [itineraryStartTime, setItineraryStartTime] = useState<string | undefined>(undefined);
@@ -1171,20 +1303,45 @@ export default function Explore() {
     userLocation: { lat: number; lng: number },
     dayIndex?: number
   ) => {
+    console.log("[Location Mismatch] ===== checkAndHandleLocationMismatch called =====");
+    console.log("[Location Mismatch] currentActivityIndex:", currentActivityIndex);
+    console.log("[Location Mismatch] userLocation:", userLocation);
+    console.log("[Location Mismatch] itinerary length:", itinerary.length);
+    console.log("[Location Mismatch] locationMismatchPromptShownRef.current:", locationMismatchPromptShownRef.current);
+    console.log("[Location Mismatch] lastLocationMismatchCheckRef.current:", lastLocationMismatchCheckRef.current);
+    
+    const now = Date.now();
+    const timeSinceLastCheck = now - lastLocationMismatchCheckRef.current;
+    console.log("[Location Mismatch] Time since last check:", Math.round(timeSinceLastCheck / 1000), "seconds");
+    console.log("[Location Mismatch] Cooldown period: 300 seconds (5 minutes)");
+    
     // Don't check if prompt was recently shown (within 5 minutes)
-    const timeSinceLastCheck = Date.now() - lastLocationMismatchCheckRef.current;
     if (locationMismatchPromptShownRef.current && timeSinceLastCheck < 300000) {
+      const remainingSeconds = Math.ceil((300000 - timeSinceLastCheck) / 1000);
+      console.log("[Location Mismatch] Alert was recently shown. Remaining cooldown:", remainingSeconds, "seconds. Skipping check.");
       return; // Don't show again too soon (within 5 minutes)
     }
 
+    console.log("[Location Mismatch] Calling checkUserLocationMismatch...");
     const mismatch = checkUserLocationMismatch(userLocation, itinerary, currentActivityIndex, 500);
+    console.log("[Location Mismatch] Mismatch result:", mismatch);
     
     if (!mismatch.isFar || !mismatch.plannedActivity) {
+      console.log("[Location Mismatch] User is at or near planned location. No alert needed.");
+      // Reset the prompt shown flag if user is now at the location
+      if (locationMismatchPromptShownRef.current) {
+        console.log("[Location Mismatch] Resetting locationMismatchPromptShownRef because user is now at location");
+        locationMismatchPromptShownRef.current = false;
+      }
       return; // User is at or near planned location
     }
 
     // User is far from planned location - prompt them
+    console.log("[Location Mismatch] User is far from planned location. Distance:", mismatch.distance, "m");
+    console.log("[Location Mismatch] Planned activity:", mismatch.plannedActivity.name);
+    console.log("[Location Mismatch] Setting locationMismatchPromptShownRef to true and updating lastLocationMismatchCheckRef");
     locationMismatchPromptShownRef.current = true;
+    lastLocationMismatchCheckRef.current = now; // Update cooldown timestamp
     
     showAlert(
       "Location Mismatch Detected",
@@ -1193,6 +1350,10 @@ export default function Explore() {
         {
           text: "Yes, Add Transition Time",
           onPress: async () => {
+            console.log("[Location Mismatch] User clicked 'Yes, Add Transition Time'");
+            // Keep locationMismatchPromptShownRef as true to maintain cooldown
+            lastLocationMismatchCheckRef.current = Date.now(); // Update cooldown timestamp
+            console.log("[Location Mismatch] Updated cooldown timestamp. Alert won't show again for 5 minutes.");
             try {
               const adjustedItinerary = allocateTransitionTime(
                 itinerary, 
@@ -1232,6 +1393,10 @@ export default function Explore() {
           text: "No",
           style: "cancel",
           onPress: async () => {
+            console.log("[Location Mismatch] User clicked 'No'");
+            // Keep locationMismatchPromptShownRef as true to maintain cooldown
+            lastLocationMismatchCheckRef.current = Date.now(); // Update cooldown timestamp
+            console.log("[Location Mismatch] Updated cooldown timestamp. Alert won't show again for 5 minutes.");
             // Ask if they want to change schedule based on current location
             showAlert(
               "Change Schedule?",
@@ -1240,6 +1405,10 @@ export default function Explore() {
                 {
                   text: "Yes, Change Schedule",
                   onPress: async () => {
+                    console.log("[Location Mismatch] User clicked 'Yes, Change Schedule'");
+                    // Keep locationMismatchPromptShownRef as true to maintain cooldown
+                    lastLocationMismatchCheckRef.current = Date.now(); // Update cooldown timestamp
+                    console.log("[Location Mismatch] Updated cooldown timestamp. Alert won't show again for 5 minutes.");
                     try {
                       // Get used place IDs to exclude
                       const usedPlaceIds = new Set<string>();
@@ -1305,7 +1474,10 @@ export default function Explore() {
                   text: "No, Keep Original",
                   style: "cancel",
                   onPress: () => {
-                    console.log("User chose to keep original schedule");
+                    console.log("[Location Mismatch] User clicked 'No, Keep Original'");
+                    // Keep locationMismatchPromptShownRef as true to maintain cooldown
+                    lastLocationMismatchCheckRef.current = Date.now(); // Update cooldown timestamp
+                    console.log("[Location Mismatch] Updated cooldown timestamp. Alert won't show again for 5 minutes.");
                   },
                 },
               ]
@@ -1314,6 +1486,8 @@ export default function Explore() {
         },
       ]
     );
+    console.log("[Location Mismatch] Location mismatch alert shown to user");
+    console.log("[Location Mismatch] ===== checkAndHandleLocationMismatch complete =====");
   }, [tripPlan, selectedDayIndex, weatherAdaptedResult, optimizedResult, userLocation]);
 
   // ---------------- Automatic schedule monitoring with location tracking ----------------
@@ -1351,8 +1525,20 @@ export default function Explore() {
       }
       setCurrentTripDayIndex(dayIdx);
       // Note: Removed auto-switching to allow user to view any day while tracking
-      const todaysItinerary = tripPlan.days[dayIdx]?.itinerary || [];
+      // IMPORTANT: Read tripPlan directly each time to ensure we get the latest state
+      // This is critical after schedule adjustments
+      const currentTripPlan = tripPlan; // Use the tripPlan from the closure
+      const todaysItinerary = currentTripPlan.days[dayIdx]?.itinerary || [];
+      console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+      console.log("[Monitoring Loop] ===== RUNNING MONITORING LOOP =====");
+      console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+      console.log("[Monitoring Loop] Reading tripPlan state - tripPlan reference:", currentTripPlan ? "EXISTS" : "NULL");
+      console.log("[Monitoring Loop] Last schedule adjustment was", Math.round((Date.now() - lastScheduleAdjustmentRef.current) / 1000), "seconds ago");
       console.log("[Itinerary] runMonitoring - Using tripPlan day", dayIdx, "itinerary with", todaysItinerary.length, "activities");
+      console.log("[Monitoring Loop] tripPlan.days[", dayIdx, "].itinerary first 3 activities:");
+      todaysItinerary.slice(0, 3).forEach((act: any, idx: number) => {
+        console.log(`[Monitoring Loop]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+      });
       if (!todaysItinerary.length) {
         console.log("[Itinerary] runMonitoring - No activities in today's itinerary, returning");
         setCurrentActivityIdx(null);
@@ -1421,6 +1607,63 @@ export default function Explore() {
         }
         
         saveActivityStatuses(updatedStatuses);
+      }
+      
+      // Check for early completion: if moving to next activity but time hasn't reached current activity's end time
+      if (currentActivityIdx !== null && newCurrentIdx !== null && newCurrentIdx > currentActivityIdx) {
+        // User moved to next activity - check if they finished early
+        const previousActivity = todaysItinerary[currentActivityIdx];
+        if (previousActivity?.end_time) {
+          // Check if we've already prompted for this activity (within last 5 minutes)
+          const lastPromptTime = earlyCompletionPromptShownRef.current[currentActivityIdx] || 0;
+          const timeSinceLastPrompt = Date.now() - lastPromptTime;
+          const cooldownPeriod = 5 * 60 * 1000; // 5 minutes
+          
+          if (timeSinceLastPrompt < cooldownPeriod) {
+            const remainingSeconds = Math.ceil((cooldownPeriod - timeSinceLastPrompt) / 1000);
+            console.log(`[Early Completion Detection] Already prompted for activity ${currentActivityIdx} ${remainingSeconds} seconds ago, skipping`);
+          } else {
+            const currentTime = await getCurrentTime();
+            const previousEndTime = parseTimeToDate(previousActivity.end_time, currentTime);
+            
+            if (currentTime < previousEndTime) {
+              // User finished early - time hasn't reached end time yet
+              const minutesEarly = Math.round((previousEndTime.getTime() - currentTime.getTime()) / 60000);
+              console.log(`[Early Completion Detection] User moved to next activity ${minutesEarly} minutes early`);
+              
+              if (minutesEarly > 5) {
+                // Mark that we've prompted for this activity
+                earlyCompletionPromptShownRef.current[currentActivityIdx] = Date.now();
+                
+                // Prompt user to confirm early completion
+                showAlert(
+                  "Early Completion Detected",
+                  `You've moved to the next activity ${minutesEarly} minutes early. Did you finish "${previousActivity.name}" early?`,
+                  [
+                    {
+                      text: "Yes, Finished Early",
+                      onPress: async () => {
+                        console.log(`[Early Completion] User confirmed early completion, rescheduling...`);
+                        // Mark that rescheduling is happening to prevent duplicate calls
+                        lastEarlyRescheduleRef.current = Date.now();
+                        await adjustScheduleForEarlyCompletion(currentActivityIdx, currentTime);
+                        // Mark previous activity as complete
+                        await markActivityComplete(currentActivityIdx, false);
+                      }
+                    },
+                    {
+                      text: "Not Yet",
+                      style: "cancel",
+                      onPress: () => {
+                        console.log("[Early Completion] User declined, keeping schedule as is");
+                      }
+                    }
+                  ]
+                );
+              }
+            }
+          }
+        }
       }
       
       setCurrentActivityIdx(newCurrentIdx);
@@ -1520,31 +1763,120 @@ export default function Explore() {
       }
       if (newCurrentIdx !== null) {
         const currentTime = await getCurrentTime();
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Monitoring Loop] ===== CALCULATING SCHEDULE STATUS IN MONITORING LOOP =====");
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Monitoring Loop] About to call calculateScheduleStatus with:");
+        console.log("[Monitoring Loop]   todaysItinerary.length:", todaysItinerary.length);
+        console.log("[Monitoring Loop]   newCurrentIdx:", newCurrentIdx);
+        console.log("[Monitoring Loop]   currentTime:", currentTime.toISOString());
+        console.log("[Monitoring Loop] todaysItinerary first 3 activities (what will be used for calculation):");
+        todaysItinerary.slice(0, 3).forEach((act: any, idx: number) => {
+          console.log(`[Monitoring Loop]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+        });
         const status = calculateScheduleStatus(todaysItinerary, newCurrentIdx, currentTime);
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Monitoring Loop] ===== SCHEDULE STATUS RESULT FROM MONITORING LOOP =====");
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Monitoring Loop] Status calculated:", {
+          isBehindSchedule: status.isBehindSchedule,
+          delayMinutes: status.delayMinutes,
+          currentActivityIndex: status.currentActivityIndex
+        });
+        console.log("[Monitoring Loop] Setting scheduleStatus state to:", status);
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
         setScheduleStatus(status);
 
         const nowTs = Date.now();
         const timeSinceLastCheck = nowTs - lastScheduleCheck;
         
         // Check for location mismatch (every 2 minutes or when activity changes)
+        // Note: lastLocationMismatchCheckRef is only updated when alert is shown/dismissed, not on every check
         const timeSinceLocationCheck = nowTs - lastLocationMismatchCheckRef.current;
+        console.log("[Location Mismatch] Monitoring check - timeSinceLocationCheck:", Math.round(timeSinceLocationCheck / 1000), "seconds");
+        console.log("[Location Mismatch] Monitoring check - newCurrentIdx:", newCurrentIdx, "currentActivityIdx:", currentActivityIdx);
         if (timeSinceLocationCheck > 120000 || newCurrentIdx !== currentActivityIdx) {
-          lastLocationMismatchCheckRef.current = nowTs;
+          console.log("[Location Mismatch] Monitoring - Calling checkAndHandleLocationMismatch");
           checkAndHandleLocationMismatch(todaysItinerary, newCurrentIdx, userLocation, dayIdx);
+        } else {
+          console.log("[Location Mismatch] Monitoring - Check interval not met or same activity. Skipping check.");
         }
         
-        if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
-          setLastScheduleCheck(nowTs);
-          generateScheduleAdjustments(todaysItinerary, status, userLocation)
-            .then(adjustments => {
-              if (adjustments.length > 0) {
-                setScheduleAdjustments(adjustments);
-                showScheduleAdjustmentPrompt(adjustments);
-              }
-            })
-            .catch(error => {
-              console.error('Failed to generate schedule adjustments:', error);
+        // Show alert immediately if:
+        // 1. First time checking (lastScheduleCheck === 0)
+        // 2. Been more than 2 minutes since last check (user might have been away)
+        // 3. Normal 10-second interval has passed (reduced from 30 seconds for faster response)
+        const shouldCheckSchedule = status.isBehindSchedule && (
+          lastScheduleCheck === 0 || 
+          timeSinceLastCheck > 120000 || 
+          timeSinceLastCheck > 10000  // Reduced from 30 seconds to 10 seconds
+        );
+        
+        if (shouldCheckSchedule) {
+          console.log("[Schedule Adjustment] Monitoring - Schedule is behind, delay:", status.delayMinutes, "minutes");
+          console.log("[Schedule Adjustment] Monitoring - scheduleAdjustmentAlertShowingRef.current:", scheduleAdjustmentAlertShowingRef.current);
+          
+          // Check if we just rescheduled early (within last 90 seconds)
+          const timeSinceEarlyReschedule = nowTs - lastEarlyRescheduleRef.current;
+          if (timeSinceEarlyReschedule < 90000) {
+            const remainingSeconds = Math.ceil((90000 - timeSinceEarlyReschedule) / 1000);
+            console.log(`[Schedule Adjustment] Monitoring - Early rescheduling just happened ${remainingSeconds} seconds ago, skipping schedule adjustment check to prevent false alerts`);
+            return;
+          }
+          
+          // Check if we just applied a schedule adjustment (within last 90 seconds)
+          const timeSinceScheduleAdjustment = nowTs - lastScheduleAdjustmentRef.current;
+          if (timeSinceScheduleAdjustment < 90000) {
+            const remainingSeconds = Math.ceil((90000 - timeSinceScheduleAdjustment) / 1000);
+            console.log(`[Schedule Adjustment] Monitoring - Schedule adjustment just applied ${remainingSeconds} seconds ago, skipping check to allow state to update`);
+            return;
+          }
+          
+          // Don't check if alert is already showing
+          if (scheduleAdjustmentAlertShowingRef.current) {
+            console.log("[Schedule Adjustment] Monitoring - Alert already showing, skipping check");
+          } else {
+            console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+            console.log("[Schedule Adjustment] ===== MONITORING LOOP: GENERATING ADJUSTMENTS =====");
+            console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+            console.log("[Schedule Adjustment] Monitoring - Current status being used:", {
+              isBehindSchedule: status.isBehindSchedule,
+              delayMinutes: status.delayMinutes,
+              currentActivityIndex: status.currentActivityIndex
             });
+            console.log("[Schedule Adjustment] Monitoring - todaysItinerary being used (first 3 activities):");
+            todaysItinerary.slice(0, 3).forEach((act: any, idx: number) => {
+              console.log(`[Schedule Adjustment]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+            });
+            console.log("[Schedule Adjustment] Monitoring - Generating schedule adjustments...");
+            setLastScheduleCheck(nowTs);
+            generateScheduleAdjustments(todaysItinerary, status, userLocation)
+              .then(adjustments => {
+                console.log("[Schedule Adjustment] Monitoring - Generated", adjustments.length, "adjustments");
+                if (adjustments.length > 0) {
+                  console.log("[Schedule Adjustment] First adjustment details:", {
+                    type: adjustments[0].type,
+                    description: adjustments[0].description,
+                    impact: adjustments[0].impact
+                  });
+                  setScheduleAdjustments(adjustments);
+                  showScheduleAdjustmentPrompt(adjustments);
+                }
+                console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+              })
+              .catch(error => {
+                console.error('Failed to generate schedule adjustments:', error);
+                console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+              });
+          }
+        } else if (status.isBehindSchedule) {
+          // Only log if we're waiting for the normal 10-second interval (not first check or long gap)
+          if (lastScheduleCheck !== 0 && timeSinceLastCheck <= 120000) {
+            const remainingSeconds = Math.ceil((10000 - timeSinceLastCheck) / 1000);
+            console.log("[Schedule Adjustment] Monitoring - Schedule is behind but check interval not met. Remaining:", remainingSeconds, "seconds");
+          } else {
+            console.log("[Schedule Adjustment] Monitoring - Schedule is behind, will check on next monitoring cycle");
+          }
         }
       }
       return;
@@ -1610,24 +1942,53 @@ export default function Explore() {
       const timeSinceLastCheck = nowTs - lastScheduleCheck;
       
       // Check for location mismatch (every 2 minutes or when activity changes)
+      // Note: lastLocationMismatchCheckRef is only updated when alert is shown/dismissed, not on every check
       const timeSinceLocationCheck = nowTs - lastLocationMismatchCheckRef.current;
       if (timeSinceLocationCheck > 120000 || newCurrentIdx !== currentActivityIdx) {
-        lastLocationMismatchCheckRef.current = nowTs;
         checkAndHandleLocationMismatch(itinerary, newCurrentIdx, userLocation);
       }
       
-      if (status.isBehindSchedule && timeSinceLastCheck > 30000) {
-        setLastScheduleCheck(nowTs);
-        generateScheduleAdjustments(itinerary, status, userLocation)
-          .then(adjustments => {
-            if (adjustments.length > 0) {
-              setScheduleAdjustments(adjustments);
-              showScheduleAdjustmentPrompt(adjustments);
-            }
-          })
-          .catch(error => {
-            console.error('Failed to generate schedule adjustments:', error);
-          });
+      // Show alert immediately if:
+      // 1. First time checking (lastScheduleCheck === 0)
+      // 2. Been more than 2 minutes since last check (user might have been away)
+      // 3. Normal 10-second interval has passed (reduced from 30 seconds for faster response)
+      const shouldCheckSchedule = status.isBehindSchedule && (
+        lastScheduleCheck === 0 || 
+        timeSinceLastCheck > 120000 || 
+        timeSinceLastCheck > 10000  // Reduced from 30 seconds to 10 seconds
+      );
+      
+      if (shouldCheckSchedule) {
+        // Check if we just rescheduled early (within last 90 seconds)
+        const timeSinceEarlyReschedule = nowTs - lastEarlyRescheduleRef.current;
+        if (timeSinceEarlyReschedule < 90000) {
+          const remainingSeconds = Math.ceil((90000 - timeSinceEarlyReschedule) / 1000);
+          console.log(`[Schedule Adjustment] Monitoring - Early rescheduling just happened ${remainingSeconds} seconds ago, skipping schedule adjustment check`);
+          return;
+        }
+        
+        // Check if we just applied a schedule adjustment (within last 90 seconds)
+        const timeSinceScheduleAdjustment = nowTs - lastScheduleAdjustmentRef.current;
+        if (timeSinceScheduleAdjustment < 90000) {
+          const remainingSeconds = Math.ceil((90000 - timeSinceScheduleAdjustment) / 1000);
+          console.log(`[Schedule Adjustment] Monitoring - Schedule adjustment just applied ${remainingSeconds} seconds ago, skipping check to allow state to update`);
+          return;
+        }
+        
+        // Don't check if alert is already showing
+        if (!scheduleAdjustmentAlertShowingRef.current) {
+          setLastScheduleCheck(nowTs);
+          generateScheduleAdjustments(itinerary, status, userLocation)
+            .then(adjustments => {
+              if (adjustments.length > 0) {
+                setScheduleAdjustments(adjustments);
+                showScheduleAdjustmentPrompt(adjustments);
+              }
+            })
+            .catch(error => {
+              console.error('Failed to generate schedule adjustments:', error);
+            });
+        }
       }
 
       // Check weather for outdoor activities (every 5 minutes or when activity changes)
@@ -2317,9 +2678,37 @@ export default function Explore() {
 
   // ---------------- Schedule Adjustment Prompts ----------------
   const showScheduleAdjustmentPrompt = useCallback(async (adjustments: any[]) => {
-    if (adjustments.length === 0) return;
+    console.log("[Schedule Adjustment] ===== showScheduleAdjustmentPrompt called =====");
+    console.log("[Schedule Adjustment] adjustments count:", adjustments.length);
+    console.log("[Schedule Adjustment] scheduleAdjustmentAlertShowingRef.current:", scheduleAdjustmentAlertShowingRef.current);
+    
+    if (adjustments.length === 0) {
+      console.log("[Schedule Adjustment] No adjustments, returning");
+      return;
+    }
+    
+    // Don't show if alert is already being displayed
+    if (scheduleAdjustmentAlertShowingRef.current) {
+      console.log("[Schedule Adjustment] Alert is already being displayed, skipping duplicate alert");
+      return;
+    }
 
     const adjustment = adjustments[0]; // Show the first (best) adjustment
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+    console.log("[Schedule Adjustment] ===== SHOWING SCHEDULE ADJUSTMENT ALERT =====");
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+    console.log("[Schedule Adjustment] Showing alert for adjustment type:", adjustment.type);
+    console.log("[Schedule Adjustment] Current scheduleStatus state:", {
+      isBehindSchedule: scheduleStatus?.isBehindSchedule,
+      delayMinutes: scheduleStatus?.delayMinutes || 0,
+      currentActivityIndex: scheduleStatus?.currentActivityIndex
+    });
+    console.log("[Schedule Adjustment] Delay minutes that will be shown in alert:", scheduleStatus?.delayMinutes || 0);
+    console.log("[Schedule Adjustment] Adjustment description:", adjustment.description);
+    console.log("[Schedule Adjustment] Adjustment impact:", adjustment.impact);
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+    
+    scheduleAdjustmentAlertShowingRef.current = true; // Mark alert as showing
     
     showAlert(
       "Schedule Adjustment Needed",
@@ -2327,13 +2716,18 @@ export default function Explore() {
       [
         {
           text: "Apply This Change",
-          onPress: () => applyScheduleAdjustment(adjustment),
+          onPress: () => {
+            console.log("[Schedule Adjustment] User clicked 'Apply This Change'");
+            scheduleAdjustmentAlertShowingRef.current = false; // Clear flag when dismissed
+            applyScheduleAdjustment(adjustment);
+          },
           style: "default"
         },
         {
           text: "Not Now",
           onPress: () => {
-            console.log("User postponed schedule adjustment");
+            console.log("[Schedule Adjustment] User clicked 'Not Now'");
+            scheduleAdjustmentAlertShowingRef.current = false; // Clear flag when dismissed
             // Reset the last check time to allow checking again later
             setLastScheduleCheck(Date.now() - 25000); // Allow checking again in 5 seconds
           },
@@ -2341,6 +2735,7 @@ export default function Explore() {
         }
       ]
     );
+    console.log("[Schedule Adjustment] ===== showScheduleAdjustmentPrompt complete =====");
   }, [scheduleStatus]);
 
   const showAllAdjustmentOptions = useCallback(async (adjustments: any[]) => {
@@ -2369,6 +2764,9 @@ export default function Explore() {
     try {
       console.log("Applying schedule adjustment:", adjustment.type);
       
+      let finalUpdatedPlan = null;
+      let finalCurrentDayIndex = currentTripDayIndex;
+      
       // Update the trip plan if we're tracking a multi-day trip
       if (tripPlan && currentTripDayIndex !== null && currentTripDayIndex !== undefined) {
         const updatedPlan = JSON.parse(JSON.stringify(tripPlan)); // Deep copy
@@ -2376,10 +2774,16 @@ export default function Explore() {
         
         // Update the itinerary for the current day
         updatedPlan.days[currentTripDayIndex].itinerary = adjustment.newItinerary;
+        finalUpdatedPlan = updatedPlan;
         
-        // Save updated trip plan
+        // Save updated trip plan FIRST before other state updates
+        // This ensures the monitoring loop picks up the new itinerary
         setTripPlan(updatedPlan);
         await AsyncStorage.setItem("savedTripPlan", JSON.stringify(updatedPlan));
+        
+        // Force a small delay to ensure state propagation, then recalculate status
+        // This ensures the monitoring loop sees the updated tripPlan
+        await new Promise(resolve => setTimeout(resolve, 100));
         
         // Update optimized result if viewing this day
         if (selectedDayIndex === currentTripDayIndex) {
@@ -2406,16 +2810,144 @@ export default function Explore() {
       // Clear the adjustments list
       setScheduleAdjustments([]);
       
-      // Force a refresh of schedule status
-      if (currentActivityIdx !== null && adjustment.newItinerary.length > 0) {
+      // Force a refresh of schedule status with the updated itinerary
+      let statusMessage = '';
+      let finalNewStatus = null;
+      const finalActivityIdx = currentActivityIdx;
+      if (finalActivityIdx !== null && adjustment.newItinerary.length > 0) {
         const currentTime = await getCurrentTime();
-        const newStatus = calculateScheduleStatus(adjustment.newItinerary, currentActivityIdx, currentTime);
-        setScheduleStatus(newStatus);
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Schedule Adjustment] ===== RECALCULATING STATUS AFTER ADJUSTMENT =====");
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Schedule Adjustment] Using updated itinerary with", adjustment.newItinerary.length, "activities");
+        console.log("[Schedule Adjustment] Current activity index:", finalActivityIdx);
+        console.log("[Schedule Adjustment] Current time:", currentTime.toISOString());
+        console.log("[Schedule Adjustment] Old status (before adjustment):", {
+          isBehindSchedule: scheduleStatus?.isBehindSchedule,
+          delayMinutes: scheduleStatus?.delayMinutes
+        });
+        console.log("[Schedule Adjustment] Adjustment type:", adjustment.type);
+        console.log("[Schedule Adjustment] Adjustment description:", adjustment.description);
+        console.log("[Schedule Adjustment] New itinerary first 3 activities:");
+        adjustment.newItinerary.slice(0, 3).forEach((act: any, idx: number) => {
+          console.log(`[Schedule Adjustment]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+        });
+        
+        const newStatus = calculateScheduleStatus(adjustment.newItinerary, finalActivityIdx, currentTime);
+        finalNewStatus = newStatus;
+        
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Schedule Adjustment] ===== STATUS CALCULATION RESULT =====");
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        console.log("[Schedule Adjustment] New schedule status after adjustment:", {
+          isBehindSchedule: newStatus.isBehindSchedule,
+          delayMinutes: newStatus.delayMinutes,
+          currentActivityIndex: newStatus.currentActivityIndex,
+          currentActivityEnd: newStatus.currentActivityEnd,
+          nextActivityStart: newStatus.nextActivityStart
+        });
+        console.log("[Schedule Adjustment] Status comparison:");
+        console.log("[Schedule Adjustment]   BEFORE: delayMinutes =", scheduleStatus?.delayMinutes || 0, ", isBehindSchedule =", scheduleStatus?.isBehindSchedule || false);
+        console.log("[Schedule Adjustment]   AFTER:  delayMinutes =", newStatus.delayMinutes, ", isBehindSchedule =", newStatus.isBehindSchedule);
+        console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        
+        // Update schedule status immediately - use functional update to ensure we're using latest state
+        setScheduleStatus((prevStatus) => {
+          console.log("[Schedule Adjustment] setScheduleStatus called - updating from:", {
+            isBehindSchedule: prevStatus?.isBehindSchedule,
+            delayMinutes: prevStatus?.delayMinutes
+          }, "to:", {
+            isBehindSchedule: newStatus.isBehindSchedule,
+            delayMinutes: newStatus.delayMinutes
+          });
+          return newStatus;
+        });
+        
+        // Create status message for alert using the NEW status
+        if (newStatus.isBehindSchedule) {
+          statusMessage = `\n\nNote: You're still ${newStatus.delayMinutes} minutes behind schedule after this adjustment.`;
+        } else {
+          statusMessage = `\n\nGreat! You're now on schedule.`;
+        }
+        
+        // Update lastScheduleCheck to prevent immediate re-triggering
+        const nowTs = Date.now();
+        
+        // If the new status shows we're on time, we don't need a long cooldown
+        // Only use a long cooldown if we're still behind schedule
+        if (newStatus.isBehindSchedule) {
+          // Still behind - use longer cooldown to prevent spam
+          setLastScheduleCheck(nowTs);
+          lastEarlyRescheduleRef.current = nowTs;
+          lastScheduleAdjustmentRef.current = nowTs;
+          console.log("[Schedule Adjustment] Still behind schedule after adjustment - setting 60 second cooldown");
+        } else {
+          // Now on time - use shorter cooldown (10 seconds) to allow quick re-check if needed
+          setLastScheduleCheck(nowTs - 20000); // Set to 20 seconds ago, so next check can happen in 10 seconds
+          lastEarlyRescheduleRef.current = nowTs - 50000; // Allow early reschedule checks after 40 seconds
+          lastScheduleAdjustmentRef.current = nowTs - 50000; // Allow adjustment checks after 40 seconds
+          console.log("[Schedule Adjustment] Now on time after adjustment - using shorter cooldown (10 seconds for next check)");
+        }
+        
+        console.log("[Schedule Adjustment] Updated schedule status and cooldowns");
+        console.log("[Schedule Adjustment] Status should now show:", newStatus.isBehindSchedule ? `${newStatus.delayMinutes} min behind` : "on time");
+        console.log("[Schedule Adjustment] Cooldown set: 90 seconds for early reschedule checks, immediate for schedule adjustments");
+        
+        // Force a re-calculation of schedule status after a short delay to ensure state has updated
+        // This ensures the UI reflects the new status even if monitoring loop hasn't run yet
+        // Also trigger the monitoring loop to re-run by clearing the cooldown if we're now on time
+        setTimeout(async () => {
+          console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+          console.log("[Schedule Adjustment] ===== DELAYED REFRESH (500ms after adjustment) =====");
+          console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+          // Re-read from state to ensure we have the latest
+          const refreshedTime = await getCurrentTime();
+          let refreshedItinerary = null;
+          
+          // Try to get the latest itinerary from state - use the updatedPlan we just set
+          if (finalUpdatedPlan && finalCurrentDayIndex !== null && finalCurrentDayIndex !== undefined) {
+            refreshedItinerary = finalUpdatedPlan.days[finalCurrentDayIndex]?.itinerary;
+            console.log("[Schedule Adjustment] Using finalUpdatedPlan.days[", finalCurrentDayIndex, "].itinerary");
+          } else if (tripPlan && finalCurrentDayIndex !== null && finalCurrentDayIndex !== undefined) {
+            // Fallback: read from current state (though this might still be stale)
+            refreshedItinerary = tripPlan.days[finalCurrentDayIndex]?.itinerary;
+            console.log("[Schedule Adjustment] Using tripPlan.days[", finalCurrentDayIndex, "].itinerary from state (fallback)");
+          }
+          
+          // Final fallback to adjustment's new itinerary
+          if (!refreshedItinerary || refreshedItinerary.length === 0) {
+            refreshedItinerary = adjustment.newItinerary;
+            console.log("[Schedule Adjustment] Using adjustment.newItinerary (final fallback)");
+          }
+          
+          if (refreshedItinerary && refreshedItinerary.length > 0 && finalActivityIdx !== null) {
+            console.log("[Schedule Adjustment] Refreshed itinerary length:", refreshedItinerary.length);
+            console.log("[Schedule Adjustment] Refreshed itinerary first 3 activities:");
+            refreshedItinerary.slice(0, 3).forEach((act: any, idx: number) => {
+              console.log(`[Schedule Adjustment]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+            });
+            const refreshedStatus = calculateScheduleStatus(refreshedItinerary, finalActivityIdx, refreshedTime);
+            console.log("[Schedule Adjustment] Refreshed status after state update:", {
+              isBehindSchedule: refreshedStatus.isBehindSchedule,
+              delayMinutes: refreshedStatus.delayMinutes
+            });
+            setScheduleStatus(refreshedStatus);
+            
+            // If we're now on time, allow the monitoring loop to check again soon
+            if (!refreshedStatus.isBehindSchedule) {
+              console.log("[Schedule Adjustment] Status now shows ON TIME - allowing monitoring loop to verify quickly");
+              // Reset cooldowns to allow quick re-check
+              setLastScheduleCheck(Date.now() - 9000); // Allow check in 1 second (10s - 9s = 1s)
+              lastScheduleAdjustmentRef.current = Date.now() - 80000; // Allow checks after 10 seconds (90s - 80s = 10s)
+            }
+          }
+          console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+        }, 500); // Reduced delay to 500ms for faster state propagation
       }
       
       showAlert(
         "Schedule Updated",
-        `Applied: ${adjustment.description}\n\n${adjustment.impact}\n\nThe schedule has been updated with new times.`
+        `Applied: ${adjustment.description}\n\n${adjustment.impact}\n\nThe schedule has been updated with new times.${statusMessage}`
       );
       
       // Force a re-render to show updated times

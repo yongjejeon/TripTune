@@ -64,14 +64,143 @@ export function calculateScheduleStatus(
     };
   }
 
+  console.log(`-----------------------------------------------------------------------------------------------------------------------------------`);
+  console.log(`[Schedule Status] ===== CALCULATING SCHEDULE STATUS =====`);
+  console.log(`-----------------------------------------------------------------------------------------------------------------------------------`);
+  console.log(`[Schedule Status] Current time: ${currentTime.toISOString()} (${formatDateToTime(currentTime)})`);
+  console.log(`[Schedule Status] Current activity index: ${currentActivityIndex}`);
+  console.log(`[Schedule Status] Current activity: ${currentActivity.name}`);
+  console.log(`[Schedule Status] Current activity end_time string: "${currentActivity.end_time}"`);
+  console.log(`[Schedule Status] Current activity travel_time_minutes: ${currentActivity.travel_time_minutes || 'not set'}`);
+  console.log(`[Schedule Status] Next activity: ${nextActivity?.name || 'none'}`);
+  console.log(`[Schedule Status] Next activity start_time string: "${nextActivity?.start_time || 'none'}"`);
+  console.log(`[Schedule Status] Itinerary length: ${itinerary.length}`);
+  console.log(`[Schedule Status] First 3 activities in itinerary:`);
+  itinerary.slice(0, 3).forEach((act, idx) => {
+    console.log(`[Schedule Status]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+  });
+  
   // Parse current activity end time (with safety check)
   const currentEndTime = parseTimeToDate(currentActivity.end_time, currentTime);
-  const nextStartTime = nextActivity?.start_time ? parseTimeToDate(nextActivity.start_time, currentTime) : null;
+  let nextStartTime = nextActivity?.start_time ? parseTimeToDate(nextActivity.start_time, currentTime) : null;
   
-  // Calculate delay
-  const delayMinutes = Math.max(0, Math.floor((currentTime.getTime() - currentEndTime.getTime()) / (1000 * 60)));
+  console.log(`[Schedule Status] Parsed currentEndTime: ${currentEndTime.toISOString()} (${formatDateToTime(currentEndTime)})`);
+  if (nextStartTime) {
+    console.log(`[Schedule Status] Parsed nextStartTime (initial): ${nextStartTime.toISOString()} (${formatDateToTime(nextStartTime)})`);
+  }
   
-  const isBehindSchedule = delayMinutes > 10; // 10 minute tolerance for automatic prompts
+  // CRITICAL FIX: Ensure nextStartTime is correctly parsed for same-day future times
+  // The issue: when nextStartTime is later today (e.g., 13:59 when current is 12:05),
+  // parseTimeToDate might incorrectly place it in the past due to date/time parsing issues
+  if (nextStartTime && nextActivity.start_time) {
+    const currentTimeStr = formatDateToTime(currentTime);
+    const nextTimeStr = nextActivity.start_time;
+    
+    // Parse times as minutes since midnight for easy comparison
+    const [currentH, currentM] = currentTimeStr.split(':').map(Number);
+    const [nextH, nextM] = nextTimeStr.split(':').map(Number);
+    const currentMinutes = currentH * 60 + currentM;
+    const nextMinutes = nextH * 60 + nextM;
+    
+    const nextStartTimeDiff = nextStartTime.getTime() - currentTime.getTime();
+    const nextStartTimeMinutesDiff = Math.round(nextStartTimeDiff / (1000 * 60));
+    
+    console.log(`[Schedule Status] Time string comparison: current="${currentTimeStr}" (${currentMinutes} min) vs next="${nextTimeStr}" (${nextMinutes} min)`);
+    console.log(`[Schedule Status] Parsed time difference: ${nextStartTimeMinutesDiff} minutes`);
+    
+    // If the next time string is numerically later than current time string, it MUST be later today
+    // (unless we've passed midnight, which we handle separately)
+    if (nextMinutes > currentMinutes) {
+      // Next time is later today - ensure nextStartTime reflects this
+      const correctNextStartTime = new Date(currentTime);
+      correctNextStartTime.setHours(nextH, nextM, 0, 0);
+      
+      // If somehow the parsed time is wrong, fix it
+      if (correctNextStartTime.getTime() <= currentTime.getTime()) {
+        // This shouldn't happen if nextMinutes > currentMinutes, but handle it anyway
+        correctNextStartTime.setDate(correctNextStartTime.getDate() + 1);
+      }
+      
+      // Only update if the parsed time was wrong
+      if (Math.abs(correctNextStartTime.getTime() - nextStartTime.getTime()) > 60000) { // More than 1 minute difference
+        nextStartTime = correctNextStartTime;
+        console.log(`[Schedule Status] FIXED: nextStartTime was incorrectly parsed. Corrected to: ${nextStartTime.toISOString()} (${formatDateToTime(nextStartTime)})`);
+      }
+    } else if (nextStartTimeDiff < 0) {
+      // Next time string is earlier, but we're checking if it's meant for tomorrow
+      const hoursDiff = Math.abs(nextStartTimeDiff) / (1000 * 60 * 60);
+      if (hoursDiff > 12) {
+        // More than 12 hours in past - likely meant for tomorrow
+        nextStartTime.setDate(nextStartTime.getDate() + 1);
+        console.log(`[Schedule Status] Next start time was ${Math.round(hoursDiff)} hours in past, adjusted to next day: ${nextStartTime.toISOString()} (${formatDateToTime(nextStartTime)})`);
+      }
+    }
+    
+    const finalDiff = nextStartTime.getTime() - currentTime.getTime();
+    const finalDiffMinutes = Math.round(finalDiff / (1000 * 60));
+    console.log(`[Schedule Status] Final nextStartTime: ${nextStartTime.toISOString()} (${formatDateToTime(nextStartTime)})`);
+    console.log(`[Schedule Status] Final time difference: ${finalDiffMinutes} minutes (${finalDiff > 0 ? 'IN FUTURE ✓' : 'IN PAST ✗'})`);
+  }
+  
+  // Calculate delay for current activity
+  const delayForCurrentActivity = Math.max(0, Math.floor((currentTime.getTime() - currentEndTime.getTime()) / (1000 * 60)));
+  console.log(`[Schedule Status] Delay for current activity: ${delayForCurrentActivity} minutes`);
+  
+  // If there's a next activity, calculate delay considering transition time
+  // CRITICAL: Just because the user finished the current activity late doesn't mean they're behind schedule
+  // They're only behind schedule if they can't reach the NEXT activity on time
+  let delayMinutes = 0;
+  let isBehindSchedule = false;
+  
+  if (nextActivity && nextActivity.start_time && nextStartTime) {
+    // Get transition time to next activity (from current activity's travel_time_minutes if available)
+    // If not available, calculate from time difference between activities
+    const transitionTimeMinutes = currentActivity.travel_time_minutes || 
+      (nextStartTime ? Math.max(0, Math.floor((nextStartTime.getTime() - currentEndTime.getTime()) / (1000 * 60))) : 15);
+    
+    console.log(`[Schedule Status] Transition time to next activity: ${transitionTimeMinutes} minutes`);
+    
+    // Calculate when user needs to leave current activity to reach next on time
+    const requiredDepartureTime = new Date(nextStartTime.getTime() - transitionTimeMinutes * 60 * 1000);
+    console.log(`[Schedule Status] Required departure time: ${requiredDepartureTime.toISOString()} (${formatDateToTime(requiredDepartureTime)})`);
+    console.log(`[Schedule Status] Current time: ${currentTime.toISOString()} (${formatDateToTime(currentTime)})`);
+    console.log(`[Schedule Status] Next start time: ${nextStartTime.toISOString()} (${formatDateToTime(nextStartTime)})`);
+    
+    // Calculate time available to reach next activity
+    const timeAvailableMinutes = Math.floor((nextStartTime.getTime() - currentTime.getTime()) / (1000 * 60));
+    console.log(`[Schedule Status] Time available to reach next activity: ${timeAvailableMinutes} minutes`);
+    console.log(`[Schedule Status] Time needed (transition): ${transitionTimeMinutes} minutes`);
+    
+    // If current time is past when they need to leave, they're behind schedule
+    if (currentTime > requiredDepartureTime) {
+      // Calculate delay: how late they are for reaching the next activity
+      const delayForNextActivity = Math.floor((currentTime.getTime() - requiredDepartureTime.getTime()) / (1000 * 60));
+      delayMinutes = Math.max(0, delayForNextActivity);
+      isBehindSchedule = delayMinutes > 10; // 10 minute tolerance
+      
+      console.log(`[Schedule Status] User is behind schedule for next activity. Delay: ${delayForNextActivity} minutes`);
+      console.log(`[Schedule Status] Final delay: ${delayMinutes} minutes, isBehindSchedule: ${isBehindSchedule}`);
+    } else {
+      // User has enough time to reach next activity - they're NOT behind schedule
+      // Even if they finished the current activity late, they can still make it to the next one
+      delayMinutes = 0;
+      isBehindSchedule = false;
+      console.log(`[Schedule Status] User is ON TIME - has ${timeAvailableMinutes} minutes to reach next activity (needs ${transitionTimeMinutes} minutes)`);
+    }
+  } else {
+    // No next activity - only check if current activity is late
+    delayMinutes = delayForCurrentActivity;
+    isBehindSchedule = delayMinutes > 10;
+    console.log(`[Schedule Status] No next activity - using current activity delay: ${delayMinutes} minutes`);
+  }
+  
+  console.log(`[Schedule Status] ===== SCHEDULE STATUS CALCULATION COMPLETE =====`);
+  console.log(`[Schedule Status] FINAL RESULT:`);
+  console.log(`[Schedule Status]   isBehindSchedule: ${isBehindSchedule}`);
+  console.log(`[Schedule Status]   delayMinutes: ${delayMinutes}`);
+  console.log(`[Schedule Status]   isOnTime: ${!isBehindSchedule}`);
+  console.log(`-----------------------------------------------------------------------------------------------------------------------------------`);
+  
   const isOnTime = !isBehindSchedule;
 
   return {
@@ -110,8 +239,19 @@ export async function generateScheduleAdjustments(
     const currentActivity = itinerary[currentActivityIndex];
     const newItinerary = [...itinerary];
     
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+    console.log("[Schedule Adjustment] ===== GENERATING EXTEND_CURRENT ADJUSTMENT =====");
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
+    console.log("[Schedule Adjustment] Extending current activity:", currentActivity.name);
+    console.log("[Schedule Adjustment] Current end_time:", currentActivity.end_time);
+    console.log("[Schedule Adjustment] Delay minutes:", delayMinutes);
+    console.log("[Schedule Adjustment] Current activity index:", currentActivityIndex);
+    console.log("[Schedule Adjustment] Total activities in itinerary:", itinerary.length);
+    
     // Update current activity end time
     const newEndTime = addMinutesToTime(currentActivity.end_time, delayMinutes);
+    console.log("[Schedule Adjustment] New end_time:", newEndTime);
+    
     newItinerary[currentActivityIndex] = {
       ...currentActivity,
       end_time: newEndTime,
@@ -119,16 +259,28 @@ export async function generateScheduleAdjustments(
     };
     
     // Push ALL subsequent activities by delayMinutes
+    console.log("[Schedule Adjustment] Pushing", newItinerary.length - currentActivityIndex - 1, "subsequent activities by", delayMinutes, "minutes");
     for (let i = currentActivityIndex + 1; i < newItinerary.length; i++) {
       const activity = newItinerary[i];
+      const oldStartTime = activity.start_time;
+      const oldEndTime = activity.end_time;
+      
       if (activity.start_time) {
         activity.start_time = addMinutesToTime(activity.start_time, delayMinutes);
+        console.log(`[Schedule Adjustment] Activity ${i} (${activity.name}): ${oldStartTime} -> ${activity.start_time}`);
       }
       if (activity.end_time) {
         activity.end_time = addMinutesToTime(activity.end_time, delayMinutes);
+        console.log(`[Schedule Adjustment] Activity ${i} (${activity.name}): end ${oldEndTime} -> ${activity.end_time}`);
       }
       newItinerary[i] = activity;
     }
+    
+    console.log("[Schedule Adjustment] ===== NEW ITINERARY TIMES (after adjustment) =====");
+    newItinerary.forEach((act, idx) => {
+      console.log(`[Schedule Adjustment]   [${idx}] ${act.name} - start: "${act.start_time || 'N/A'}", end: "${act.end_time || 'N/A'}"`);
+    });
+    console.log("-----------------------------------------------------------------------------------------------------------------------------------");
 
     adjustments.push({
       type: 'extend_current',
@@ -293,7 +445,7 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
 /**
  * Parse time string to Date object
  */
-function parseTimeToDate(timeString: string, baseDate: Date): Date {
+export function parseTimeToDate(timeString: string, baseDate: Date): Date {
   // Safety check for undefined/null timeString
   if (!timeString || typeof timeString !== 'string') {
     console.warn('[ScheduleManager] Invalid timeString:', timeString);
@@ -307,8 +459,21 @@ function parseTimeToDate(timeString: string, baseDate: Date): Date {
   }
   
   const [hours, minutes] = parts.map(Number);
+  
+  // Validate hours and minutes
+  if (isNaN(hours) || isNaN(minutes) || hours < 0 || hours >= 24 || minutes < 0 || minutes >= 60) {
+    console.warn('[ScheduleManager] Invalid time values:', timeString, `hours: ${hours}, minutes: ${minutes}`);
+    return new Date(baseDate); // Return baseDate as fallback
+  }
+  
   const date = new Date(baseDate);
   date.setHours(hours, minutes, 0, 0);
+  
+  // If the parsed time is earlier than baseDate and the difference is more than 12 hours,
+  // it's likely meant for the next day (e.g., if baseDate is 10 AM and timeString is "09:00", it should be 9 AM tomorrow)
+  // But for schedule status checks, we typically want same-day times, so we only adjust if it's clearly wrong
+  // Actually, let's not auto-adjust here - let the caller handle date logic
+  
   return date;
 }
 
